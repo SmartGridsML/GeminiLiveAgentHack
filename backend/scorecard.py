@@ -11,6 +11,30 @@ if TYPE_CHECKING:
 # Minimum meaningful session length; anything shorter gets a null scorecard.
 _MIN_SESSION_SEC = 5.0
 
+# Goal → category weights (must sum to 1.0).
+# When a user selects a focus goal, the overall score emphasises that dimension
+# so the final number reflects what they were actually practising.
+_GOAL_WEIGHTS: dict[str, dict[str, float]] = {
+    "balanced":           {"filler": 0.22, "eye": 0.23, "pace": 0.20, "clarity": 0.15, "visual": 0.10, "prosody": 0.10},
+    "reduce_fillers":     {"filler": 0.40, "eye": 0.16, "pace": 0.14, "clarity": 0.13, "visual": 0.07, "prosody": 0.10},
+    "improve_pacing":     {"filler": 0.10, "eye": 0.14, "pace": 0.35, "clarity": 0.11, "visual": 0.06, "prosody": 0.24},
+    "improve_confidence": {"filler": 0.10, "eye": 0.30, "pace": 0.18, "clarity": 0.20, "visual": 0.05, "prosody": 0.17},
+    "improve_structure":  {"filler": 0.08, "eye": 0.12, "pace": 0.12, "clarity": 0.45, "visual": 0.12, "prosody": 0.11},
+}
+
+# Severity weights used to apply an overall-session penalty when the coach had
+# to interrupt. Category scores remain dimension-specific; this normalizes the
+# "overall" grade so sessions with multiple flags do not still show as perfect.
+_EVENT_SEVERITY = {
+    "filler": 2.0,
+    "eye_contact": 2.0,
+    "pace": 3.0,
+    "clarity": 3.0,
+    "contradiction": 4.0,
+    "slide_clarity": 2.0,
+    "slide_mismatch": 3.0,
+}
+
 
 def build_scorecard(state: "SessionState") -> dict:
     duration_sec = state.duration_seconds()
@@ -35,10 +59,12 @@ def build_scorecard(state: "SessionState") -> dict:
             "overall_score": 0,
             "categories": {},
             "coaching_events": [],
+            "timeline_events": state.timeline_events,
             "transcript": state.transcript,
             "final_report": state.final_report or "(Session too short to evaluate.)",
             "research_tips": state.research_tips,
             "generated_assets": state.generated_assets,
+            "prosody": state.prosody_metrics,
         }
 
     # Use holistic AI scores from the synthesis agent when available;
@@ -47,16 +73,23 @@ def build_scorecard(state: "SessionState") -> dict:
     filler_score = ai["filler"] if "filler" in ai else _score_filler(state.filler_count, duration_min)
     eye_score    = ai["eye"]    if "eye"    in ai else _score_eye(state.eye_contact_drops, duration_min)
     pace_score   = ai["pace"]   if "pace"   in ai else _score_pace(state.pace_violations, duration_min)
-    clarity_score = ai["clarity"] if "clarity" in ai else _score_clarity(state.contradictions, state.clarity_flags)
+    clarity_score = ai["clarity"] if "clarity" in ai else _score_clarity(state.contradictions, state.clarity_flags, duration_min)
     visual_score  = ai["visual"]  if "visual"  in ai else _score_visual(state.visual_flags, state.mismatch_flags, duration_min)
+    prosody_score = _score_prosody(getattr(state, "prosody_metrics", {}))
 
-    overall = int(
-        filler_score * 0.30
-        + eye_score * 0.25
-        + pace_score * 0.20
-        + clarity_score * 0.15
-        + visual_score * 0.10
+    goal = (getattr(state, "primary_goal", None) or "balanced")
+    w = _GOAL_WEIGHTS.get(goal, _GOAL_WEIGHTS["balanced"])
+
+    overall_base = (
+        filler_score * w["filler"]
+        + eye_score * w["eye"]
+        + pace_score * w["pace"]
+        + clarity_score * w["clarity"]
+        + visual_score * w["visual"]
+        + prosody_score * w["prosody"]
     )
+    event_penalty = _overall_event_penalty(state)
+    overall = round(max(0.0, overall_base - event_penalty), 1)
 
     return {
         "session_id": state.session_id,
@@ -71,6 +104,12 @@ def build_scorecard(state: "SessionState") -> dict:
         "created_at": created_at,
         "duration_seconds": round(duration_sec, 1),
         "overall_score": overall,
+        "scoring": {
+            "base_score": round(overall_base, 1),
+            "event_penalty": round(event_penalty, 1),
+            "goal": goal,
+            "weights": w,
+        },
         "categories": {
             "filler_words": {
                 "score": filler_score,
@@ -99,6 +138,14 @@ def build_scorecard(state: "SessionState") -> dict:
                 "slide_mismatch_flags": state.mismatch_flags,
                 "label": _grade(visual_score),
             },
+            "prosody": {
+                "score": prosody_score,
+                "pitch_variance_hz": float(state.prosody_metrics.get("pitch_variance_hz", 0.0)),
+                "pause_ratio_20s": float(state.prosody_metrics.get("pause_ratio_20s", 0.0)),
+                "speaking_energy": float(state.prosody_metrics.get("speaking_energy", 0.0)),
+                "monotony_score": float(state.prosody_metrics.get("monotony_score", 0.0)),
+                "label": _grade(prosody_score),
+            },
         },
         "coaching_events": [
             {
@@ -109,10 +156,12 @@ def build_scorecard(state: "SessionState") -> dict:
             }
             for e in state.events
         ],
+        "timeline_events": state.timeline_events,
         "transcript": state.transcript,
         "final_report": state.final_report,
         "research_tips": state.research_tips,
         "generated_assets": state.generated_assets,
+        "prosody": state.prosody_metrics,
     }
 
 
@@ -149,12 +198,15 @@ def _score_pace(violations: int, duration_min: float) -> int:
     return 30
 
 
-def _score_clarity(contradictions: int, clarity_flags: int) -> int:
+def _score_clarity(contradictions: int, clarity_flags: int, duration_min: float = 1.5) -> int:
     total = contradictions + clarity_flags
-    if total == 0:  return 100
-    if total == 1:  return 75
-    if total == 2:  return 55
-    if total <= 4:  return 35
+    if total == 0:
+        return 100
+    rate = total / max(duration_min, 0.5)  # issues per minute
+    if rate < 0.5:  return 85
+    if rate < 1.0:  return 70
+    if rate < 2.0:  return 50
+    if rate < 3.5:  return 30
     return 15
 
 
@@ -174,9 +226,65 @@ def _score_visual(slide_flags: int, mismatch_flags: int, duration_min: float) ->
     return 25
 
 
+def _score_prosody(prosody: dict) -> int:
+    if not prosody:
+        return 100
+
+    voiced = float(prosody.get("voiced_seconds_20s") or 0.0)
+    if voiced < 5.0:
+        return 100
+
+    monotony = float(prosody.get("monotony_score") or 0.0)
+    pause_ratio = float(prosody.get("pause_ratio_20s") or 0.0)
+    energy = float(prosody.get("speaking_energy") or 0.0)
+
+    score = 100.0
+    if monotony >= 85:
+        score -= 30
+    elif monotony >= 70:
+        score -= 18
+    elif monotony >= 55:
+        score -= 8
+
+    if pause_ratio < 0.07:
+        score -= 18
+    elif pause_ratio < 0.11:
+        score -= 10
+    elif pause_ratio > 0.45:
+        score -= 8
+
+    if energy < 0.012:
+        score -= 14
+    elif energy < 0.018:
+        score -= 8
+    elif energy > 0.11:
+        score -= 10
+
+    return int(max(20, min(100, round(score))))
+
+
 def _grade(score: int) -> str:
     if score >= 90: return "Excellent"
     if score >= 75: return "Good"
     if score >= 55: return "Needs Work"
     if score >= 35: return "Poor"
     return "Critical"
+
+
+def _overall_event_penalty(state: "SessionState") -> float:
+    """
+    Session-level penalty derived from interruption severity.
+
+    Why this exists:
+    - Dimension scores capture *where* issues happened.
+    - Overall score should also reflect *how often* the coach had to step in.
+    """
+    if not state.events:
+        return 0.0
+
+    raw = 0.0
+    for event in state.events:
+        raw += _EVENT_SEVERITY.get(getattr(event, "event_type", ""), 2.0)
+
+    # Cap prevents very long sessions from collapsing to zero purely from count.
+    return min(25.0, raw)

@@ -31,6 +31,14 @@ REQUIRED_SYNTHESIS_SECTIONS = [
     "**Delivery**",
     "**Top Fixes**",
     "**What Worked**",
+    # All 5 machine-readable scores — must be present for scorecard to work.
+    # If any are missing, validate_synthesis() returns False and the repair
+    # prompt explicitly lists them so the model adds them on retry.
+    "SCORE_FILLER:",
+    "SCORE_PACE:",
+    "SCORE_EYE:",
+    "SCORE_CLARITY:",
+    "SCORE_VISUAL:",
 ]
 
 

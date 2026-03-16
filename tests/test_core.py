@@ -27,6 +27,7 @@ class _FakeState:
     current_slide_index = -1
     session_start = time.time() - 90  # 90-second session
     events = []
+    timeline_events = []
     transcript = [{"s": "u", "t": "hello world", "ts": 10.0}]
     filler_count = 0
     eye_contact_drops = 0
@@ -39,6 +40,13 @@ class _FakeState:
     research_tips = ""
     generated_assets = []
     ai_scores: dict = {}
+    prosody_metrics = {
+        "pitch_variance_hz": 0.0,
+        "pause_ratio_20s": 0.2,
+        "speaking_energy": 0.03,
+        "monotony_score": 0.0,
+        "voiced_seconds_20s": 10.0,
+    }
 
     def duration_seconds(self):
         return time.time() - self.session_start
@@ -50,6 +58,8 @@ def test_scorecard_basic():
     sc = build_scorecard(state)
     assert sc["session_id"] == "test-session"
     assert sc["overall_score"] == 100  # zero events → perfect
+    assert sc["scoring"]["base_score"] == 100
+    assert sc["scoring"]["event_penalty"] == 0
     assert "filler_words" in sc["categories"]
 
 
@@ -92,6 +102,42 @@ def test_scorecard_ai_scores_partial_fallback():
     sc = build_scorecard(state)
     assert sc["categories"]["filler_words"]["score"] == 42
     assert sc["categories"]["pace"]["score"] == 100  # 0 violations → 100
+
+
+def test_scorecard_includes_prosody_category():
+    from backend.scorecard import build_scorecard
+    state = _FakeState()
+    state.prosody_metrics = {
+        "pitch_variance_hz": 6.2,
+        "pause_ratio_20s": 0.03,
+        "speaking_energy": 0.01,
+        "monotony_score": 82.0,
+        "voiced_seconds_20s": 15.0,
+    }
+    sc = build_scorecard(state)
+    assert "prosody" in sc["categories"]
+    assert sc["categories"]["prosody"]["score"] < 100
+
+
+def test_scorecard_applies_event_penalty_to_overall():
+    from backend.scorecard import build_scorecard
+
+    state = _FakeState()
+    state.pace_violations = 1
+    state.events = [
+        python_types.SimpleNamespace(
+            timestamp=12.3,
+            event_type="pace",
+            description="Speaking too fast.",
+            evidence={},
+        )
+    ]
+
+    sc = build_scorecard(state)
+    # Base score with one pace violation in ~90s is 96.0; pace event penalty brings it down.
+    assert sc["scoring"]["base_score"] == 96.0
+    assert sc["scoring"]["event_penalty"] == 3.0
+    assert sc["overall_score"] == 93.0
 
 
 # ── AI score extraction ───────────────────────────────────────────
@@ -143,6 +189,9 @@ def test_validate_synthesis_passes():
         "**Delivery**\nOK\n"
         "**Top Fixes**\n1. Fix\n"
         "**What Worked**\nGood.\n"
+        "**IMAGE_PROMPTS**\nIMAGE_PROMPT_1: slide\n"
+        "**SCORES**\n"
+        "SCORE_FILLER: 80\nSCORE_PACE: 60\nSCORE_EYE: 95\nSCORE_CLARITY: 70\nSCORE_VISUAL: 100\n"
     )
     assert _validate_synthesis(text) is True
 
@@ -166,7 +215,13 @@ def test_missing_synthesis_sections():
     assert "**Content & Structure**" in missing
     assert "**Delivery**" in missing
     assert "**Top Fixes**" in missing
+    assert "SCORE_FILLER:" in missing
+    assert "SCORE_PACE:" in missing
+    assert "SCORE_EYE:" in missing
+    assert "SCORE_CLARITY:" in missing
+    assert "SCORE_VISUAL:" in missing
     assert "**Opening & Core Message**" not in missing
+    assert "**What Worked**" not in missing
 
 
 # ── Image prompt extraction ───────────────────────────────────────
@@ -231,6 +286,8 @@ def test_flag_issue_cooldown():
     state = SessionState(session_id="cooldown-test")
     # Add a transcript segment so metrics compute correctly
     state.add_transcript("user", "um um um basically like you know")
+    state.record_signal("pace_high", measured=220, threshold=">180", source="test")
+    state.record_signal("filler_burst", measured=5, threshold=">=3", source="test")
 
     tools = make_coaching_tools(state)
     flag = next(t for t in tools if t.__name__ == "flag_issue")
@@ -257,12 +314,28 @@ def test_flag_issue_invalid_type():
     assert "invalid_issue_type" in result["reason"]
 
 
+def test_flag_issue_requires_two_signals():
+    from backend.session_state import SessionState
+    from backend.agents.tools import make_coaching_tools
+
+    state = SessionState(session_id="two-signal-test")
+    state.add_transcript("user", "um um um")
+    state.record_signal("filler_burst", measured=4, threshold=">=3", source="test")
+    tools = make_coaching_tools(state)
+    flag = next(t for t in tools if t.__name__ == "flag_issue")
+    result = flag("filler", "Filler burst detected")
+    assert result["recorded"] is False
+    assert result["reason"] == "two_signal_gate"
+
+
 def test_flag_issue_evidence_populated():
     from backend.session_state import SessionState
     from backend.agents.tools import make_coaching_tools
 
     state = SessionState(session_id="evidence-test")
     state.add_transcript("user", "um uh like basically um")
+    state.record_signal("pace_high", measured=210, threshold=">180", source="test")
+    state.record_signal("filler_burst", measured=5, threshold=">=3", source="test")
     tools = make_coaching_tools(state)
     flag = next(t for t in tools if t.__name__ == "flag_issue")
 
@@ -346,3 +419,46 @@ def test_mark_slide_issue_invalid_type():
     mark = next(t for t in tools if t.__name__ == "mark_slide_issue")
     result = mark("not_a_real_type")
     assert result["status"] == "error"
+
+
+# ── SESSION_SUMMARY_AGENT JSON output ─────────────────────────────
+
+def test_session_summary_agent_json_parse():
+    """The JSON emitted by SESSION_SUMMARY_AGENT must round-trip cleanly."""
+    import json
+    sample = json.dumps({
+        "recurring_issues": ["filler_words", "pace"],
+        "strengths": ["eye_contact"],
+        "trajectory": "First session. Pace and filler words are primary targets.",
+        "next_focus": "reduce_fillers",
+        "session_score": 72,
+    })
+    profile = json.loads(sample)
+    assert profile["next_focus"] == "reduce_fillers"
+    assert "filler_words" in profile["recurring_issues"]
+    assert profile["session_score"] == 72
+
+
+def test_session_summary_agent_required_keys():
+    """Verify all required profile keys are present in a realistic output."""
+    import json
+    sample = (
+        '{"recurring_issues": ["pace"], "strengths": [], '
+        '"trajectory": "Needs pacing work.", "next_focus": "improve_pacing", '
+        '"session_score": 55}'
+    )
+    profile = json.loads(sample)
+    for key in ("recurring_issues", "strengths", "trajectory", "next_focus", "session_score"):
+        assert key in profile, f"Missing required key: {key}"
+
+
+def test_session_summary_agent_exported():
+    """SESSION_SUMMARY_AGENT is importable and is an LlmAgent (requires google-adk)."""
+    pytest.importorskip("google.adk", reason="google-adk not installed")
+    from google.adk.agents import LlmAgent
+    from backend.agents.post_session import SESSION_SUMMARY_AGENT, PARALLEL_ANALYSTS, POST_SESSION_PIPELINE
+    assert isinstance(SESSION_SUMMARY_AGENT, LlmAgent)
+    assert SESSION_SUMMARY_AGENT.name == "session_summary_agent"
+    assert SESSION_SUMMARY_AGENT.output_key == "session_profile_json"
+    # Pipeline wiring sanity
+    assert POST_SESSION_PIPELINE.name == "post_session_pipeline"

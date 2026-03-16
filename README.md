@@ -2,7 +2,7 @@
 
 > Real-time AI speaking coach. Rehearse talks, interviews, demos, or pitches while PitchMirror listens, watches, and interrupts with measured feedback.
 
-**Category:** Live Agents — [Gemini Live Agent Challenge](https://ai.google.dev/competition/live-agent)
+**Category:** Live Agents — [Gemini Live Agent Challenge](https://geminiliveagentchallenge.devpost.com/)
 
 [![Architecture](docs/architecture.png)](docs/architecture.png)
 
@@ -25,16 +25,16 @@ When it detects:
 | Problem | Trigger | Example coaching response |
 |---------|---------|--------------------------|
 | Filler words | 3+ "um/uh/like" in 30s | *"Three 'ums' in ten seconds. Pause instead."* |
-| Pace | >180 WPM for 10s | *"Slow down — you're rushing."* |
+| Pace | `wpm_20s > 180` (rolling 20s window) | *"Slow down — you're rushing."* |
 | Eye contact | Prolonged disengaged gaze (context-aware threshold) | *"Reconnect with the audience/camera."* |
 | Contradiction | Statement contradicts prior claim | *"That contradicts your 'first to market' claim."* |
 | Clarity | Incomprehensible sentence | *"That sentence lost everyone. Say it in one clause."* |
 | Slide clarity (optional screen share) | clutter/unreadable/weak hierarchy | *"Slide is text-dense. Cut to three bullets."* |
 | Slide-speech mismatch (optional) | narration and slide conflict | *"Narration and slide are misaligned."* |
 
-After your session: a **scorecard** with per-category scores, timeline events, AI report, citations, and 2 generated visual coaching cards.
+During the live session, the coach can trigger real UI actions (`navigate_practice_slides`, `jump_to_slide`, `mark_slide_issue`) and generate an in-session visual hint (`generate_live_visual_hint`).
 
-UI action path: the agent can execute real frontend actions, including advancing the built-in **Practice Deck** via `navigate_practice_slides`.
+After your session: a **scorecard** with per-category scores, timeline events, AI report, citations, and up to 2 generated visual coaching cards.
 
 Eye-contact handling is context-aware:
 - `virtual`: camera-facing is prioritized.
@@ -45,6 +45,11 @@ Eye-contact handling is context-aware:
 
 ## Architecture
 
+### Live Session (real-time)
+
+One low-latency bidirectional stream, one orchestrating agent — intentionally lean for
+sub-second response latency. Deep specialization moves to the post-session pipeline.
+
 ```
 Browser (HTML/JS)
   ├── getUserMedia()  → webcam + mic
@@ -54,23 +59,52 @@ Browser (HTML/JS)
   ├── Screen JPEG @0.5fps → WebSocket → Cloud Run
   └── Coach audio 24kHz ← WebSocket ← Cloud Run
             │
-    ┌───────▼────────────────────────────────┐
-    │  Cloud Run (FastAPI + Uvicorn)          │
-    │  WebSocket /ws                          │
-    │    ├── AudioBridge → Gemini Live API    │
-    │    ├── VideoBridge → Gemini Live API    │
-    │    ├── CoachingEngine (mode-aware prompt)│
-    │    ├── Screen Clarity Tool + Demo Mode  │
-    │    ├── Imagen post-session visual cards │
-    │    └── ScorecardBuilder                 │
-    └───────┬────────────────────────────────┘
+    ┌───────▼──────────────────────────────────────┐
+    │  Cloud Run (FastAPI + Uvicorn)                │
+    │                                               │
+    │  LiveCoachAgent  (gemini-2.5-flash-native-    │
+    │    -audio-preview-12-2025)                    │
+    │    └── 10 ADK tools (closures over SessionState):
+    │         flag_issue · check_eye_contact        │
+    │         get_speech_metrics · draw_overlay     │
+    │         navigate_practice_slides              │
+    │         jump_to_slide · mark_slide_issue      │
+    │         generate_live_visual_hint (Imagen)    │
+    │         get_recent_transcript · adjust_focus  │
+    └───────┬──────────────────────────────────────┘
             │
-    ┌───────▼────────────┐   ┌─────────────────────┐
-    │  Gemini Live API   │   │  Firestore           │
-    │  gemini-2.5-flash  │   │  Session scorecards  │
-    │  -native-audio-    │   └─────────────────────┘
-    │  preview-12-2025   │
-    └────────────────────┘
+    ┌───────▼────────────┐   ┌──────────────────────┐
+    │  Gemini Live API   │   │  Firestore            │
+    │  (native audio)    │   │  Session scorecards   │
+    └────────────────────┘   │  User skill profiles  │
+                             └──────────────────────┘
+```
+
+> ADK supports multi-agent `run_live()` topologies via `sub_agents` and live transfers.
+> PitchMirror keeps the live phase as a single orchestrating agent by design — the tool
+> pipeline provides deterministic measurement grounding and Imagen image generation
+> without the latency cost of mid-session agent handoffs.
+
+### Post-Session Pipeline (multi-agent)
+
+```
+_run_post_session()
+  │
+  ├─ PARALLEL_ANALYSTS (ADK ParallelAgent)
+  │    ├── DeliveryAnalyst  (gemini-2.5-flash)  → delivery_analysis
+  │    ├── ContentAnalyst   (gemini-2.5-flash)  → content_analysis
+  │    └── ResearchAgent    (google_search)     → research_tips
+  │
+  ├─ SynthesisAgent (gemini-2.5-flash)
+  │    └── Combines all three → final report + SCORE_* lines + IMAGE_PROMPTS
+  │
+  └─ SessionSummaryAgent (gemini-2.5-flash)
+       └── Writes structured JSON skill profile → Firestore
+            (cross-session learning loop — feeds next session's context)
+
+POST_SESSION_PIPELINE = SequentialAgent(
+  PARALLEL_ANALYSTS → SynthesisAgent → SessionSummaryAgent
+)
 ```
 
 **Google Cloud services used:**
@@ -90,12 +124,12 @@ Browser (HTML/JS)
 
 ---
 
-## Local development (5 steps)
+## Local development (6 steps)
 
 ```bash
 # 1. Clone and enter the repo
-git clone https://github.com/YOUR_USERNAME/pitchmirror
-cd pitchmirror
+git clone https://github.com/SmartGridsML/GeminiLiveAgentHack.git
+cd GeminiLiveAgentHack
 
 # 2. Create virtual environment and install deps
 python -m venv .venv
@@ -109,7 +143,10 @@ cp .env.example .env
 # 4. Run the smoke test (validates Live API access before building)
 python scripts/smoke_test.py
 
-# 5. Start the server
+# 5. Run tests
+python -m pytest tests/ -v
+
+# 6. Start the server
 uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
 # Open: http://localhost:8080
 ```
@@ -128,11 +165,15 @@ curl -s http://localhost:8080/health
 
 # 2) Gemini connectivity smoke test (must print success, no traceback)
 python scripts/smoke_test.py
+
+# 3) Unit tests
+python -m pytest tests/ -v
 ```
 
 Expected result:
 - `/health` returns JSON with `"status": "ok"`.
 - `smoke_test.py` completes without errors.
+- `pytest` passes (current baseline: 25 tests).
 
 ### B) UI + live agent behavior
 
@@ -198,36 +239,43 @@ Expected result:
 # Set your project
 export PROJECT_ID=your-project-id
 export REGION=us-central1
-export GEMINI_API_KEY=your_gemini_api_key
+export REPO=pitchmirror
+export GOOGLE_API_KEY=your_gemini_api_key
 export API_BEARER_TOKEN=$(openssl rand -hex 24)
 
-# Enable APIs
+# Enable APIs (build + deploy + data + secrets)
 gcloud services enable run.googleapis.com firestore.googleapis.com \
-  secretmanager.googleapis.com artifactregistry.googleapis.com \
+  secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com \
   --project=$PROJECT_ID
 
-# Create Artifact Registry repo
-gcloud artifacts repositories create pitchmirror \
+# Create Artifact Registry repo (one-time)
+gcloud artifacts repositories create $REPO \
   --repository-format=docker --location=$REGION --project=$PROJECT_ID
 
-# Build and push container
-docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/pitchmirror/app:latest .
-docker push $REGION-docker.pkg.dev/$PROJECT_ID/pitchmirror/app:latest
+# Build + push current commit image with immutable digest
+export SHA=$(git rev-parse --short HEAD)
+export IMAGE_TAG=$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/app:$SHA
+gcloud builds submit . --tag $IMAGE_TAG --project=$PROJECT_ID
+export DIGEST=$(gcloud artifacts docker images describe $IMAGE_TAG --project=$PROJECT_ID --format='value(image_summary.digest)')
+export IMAGE_IMMUTABLE=$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/app@$DIGEST
 
 # Store API key in Secret Manager (create secret once, then add a version)
 if ! gcloud secrets describe pitchmirror-gemini-api-key --project=$PROJECT_ID >/dev/null 2>&1; then
   gcloud secrets create pitchmirror-gemini-api-key \
     --replication-policy=automatic --project=$PROJECT_ID
 fi
-printf '%s' "$GEMINI_API_KEY" | gcloud secrets versions add pitchmirror-gemini-api-key \
+printf '%s' "$GOOGLE_API_KEY" | gcloud secrets versions add pitchmirror-gemini-api-key \
   --data-file=- --project=$PROJECT_ID
 
 # Deploy to Cloud Run
 gcloud run deploy pitchmirror \
-  --image=$REGION-docker.pkg.dev/$PROJECT_ID/pitchmirror/app:latest \
+  --image=$IMAGE_IMMUTABLE \
   --region=$REGION \
   --set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,CORS_ALLOWED_ORIGINS=https://your-frontend-domain,API_BEARER_TOKEN=$API_BEARER_TOKEN,ENABLE_SCREEN_SHARE=true,ENABLE_IMAGE_GENERATION=true,DEMO_MODE_DEFAULT=false \
   --set-secrets=GOOGLE_API_KEY=pitchmirror-gemini-api-key:latest \
+  --session-affinity \
+  --min-instances=1 \
+  --timeout=900 \
   --allow-unauthenticated \
   --project=$PROJECT_ID
 ```
@@ -243,7 +291,8 @@ export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_
 
 # Avoid leaking values into shell history by using TF_VAR_*
 export TF_VAR_project_id=$PROJECT_ID
-export TF_VAR_container_image=$REGION-docker.pkg.dev/$PROJECT_ID/pitchmirror/app:latest
+# Prefer immutable digest from Option A build step (IMAGE_IMMUTABLE)
+export TF_VAR_container_image=$IMAGE_IMMUTABLE
 export TF_VAR_gemini_secret_id=pitchmirror-gemini-api-key
 export TF_VAR_firestore_collection=pitchmirror_sessions
 export TF_VAR_allowed_origins=https://your-frontend-domain
@@ -274,7 +323,6 @@ terraform apply
 | `GOOGLE_API_KEY` | Yes | — | Gemini Developer API key |
 | `GOOGLE_CLOUD_PROJECT` | For Firestore | — | GCP project ID |
 | `FIRESTORE_COLLECTION` | No | `pitchmirror_sessions` | Firestore collection name |
-| `GEMINI_BACKEND` | No | `gemini` | `gemini` or `vertex` |
 | `ENVIRONMENT` | No | `development` | `development` or `production` |
 | `CORS_ALLOWED_ORIGINS` | No | `*` | Comma-separated allowed origins (`*` for local dev only) |
 | `API_BEARER_TOKEN` | No | empty | Optional shared token required for `/api/*` and `/ws` when set |
@@ -294,6 +342,8 @@ terraform apply
 | `ENABLE_SCREEN_SHARE` | No | `true` | Enable screen-share frame ingestion (UI toggle still controls per session) |
 | `ENABLE_IMAGE_GENERATION` | No | `true` | Enable post-session multimodal image generation |
 | `DEMO_MODE_DEFAULT` | No | `false` | Make deterministic demo behavior default unless overridden in UI |
+| `PITCHMIRROR_LIVE_MODEL` | No | `gemini-2.5-flash-native-audio-preview-12-2025` | Override live coaching model |
+| `PITCHMIRROR_ANALYSIS_MODEL` | No | `gemini-2.5-flash` | Override post-session analyst/synthesis model |
 | `PITCHMIRROR_IMAGE_MODEL` | No | `imagen-4.0-fast-generate-001` | Image model for scorecard visuals |
 | `IMAGE_GENERATION_TIMEOUT_S` | No | `24` | Timeout per generated image |
 | `IMAGE_GENERATION_RETRIES` | No | `1` | Retry count per generated image |
@@ -306,6 +356,7 @@ PitchMirror is WebSocket-first for live coaching, and also exposes read-only RES
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
+| `/api/health` | GET | API health check (same payload as `/health`) |
 | `/api/slides/upload` | POST | Upload PDF deck and return metadata + first slide eagerly (lazy loading for remaining slides) |
 | `/api/slides/{deck_id}/{slide_index}` | GET | Fetch one slide image on demand for lazy/background loading |
 | `/api/sessions?limit=20` | GET | Recent sessions (summary) |
@@ -321,7 +372,7 @@ If `API_BEARER_TOKEN` is set:
 Notes:
 - Slide uploads are optimized for responsiveness: conversion runs off the event loop and only the first slide is returned immediately.
 - Remaining slides are fetched lazily via `/api/slides/{deck_id}/{slide_index}`.
-- Slide decks are kept in per-instance memory. `infra/main.tf` already sets `session_affinity = true` and `min_instance_count = 1` to ensure upload and WebSocket session reach the same instance. If you deploy via `gcloud run deploy` instead of Terraform, pass `--session-affinity --min-instances 1`.
+- Slide decks are kept in per-instance memory. Keep `session affinity` ON and `min instances >= 1` in Cloud Run to ensure upload and WebSocket session stay on the same instance.
 
 ---
 
@@ -351,8 +402,8 @@ Expected real-time corrections:
 Target video flow (3:30–3:50):
 1. 0:00–0:20: hook + mode/toggles
 2. 0:20–1:40: live interruptions (audio + transcript + tool-call evidence)
-3. 1:40–2:20: screen-aware slide correction
-4. 2:20–3:10: post-session pipeline + generated visual cards
+3. 1:40–2:20: screen-aware slide correction + slide action tool call
+4. 2:20–3:10: live visual hint generation + post-session generated visual cards
 5. 3:10–3:50: final scorecard + Cloud Run proof + architecture diagram
 
 Rehearsal checklist: [scripts/rehearsal_checklist.md](scripts/rehearsal_checklist.md)

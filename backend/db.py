@@ -12,6 +12,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 FIRESTORE_COLLECTION = os.getenv("FIRESTORE_COLLECTION", "pitchmirror_sessions")
+PROFILES_COLLECTION = os.getenv("PROFILES_COLLECTION", "pitchmirror_user_profiles")
 
 
 def _int_env(name: str, default: int) -> int:
@@ -35,6 +36,7 @@ class FirestoreClient:
         self._enabled = False
         self._memory_store: dict[str, dict] = {}
         self._recent_ids: deque[str] = deque()
+        self._user_profiles: dict[str, dict] = {}
         self._init()
 
     def _init(self):
@@ -124,6 +126,41 @@ class FirestoreClient:
                 logger.error(f"Failed to fetch session {session_id}: {e}")
 
         cached = self._memory_store.get(session_id)
+        return deepcopy(cached) if cached else None
+
+    async def save_user_profile(self, user_id: str, profile: dict) -> bool:
+        """Persist a structured skill profile keyed by user_id (cross-session memory)."""
+        payload = dict(profile)
+        payload["user_id"] = user_id
+        payload["updated_at"] = int(time.time())
+        self._user_profiles[user_id] = deepcopy(payload)
+
+        if not self._enabled or self._client is None:
+            logger.debug("[in-memory] user profile saved for %s (Firestore disabled)", user_id)
+            return False
+        try:
+            doc_ref = self._client.collection(PROFILES_COLLECTION).document(user_id)
+            await doc_ref.set(payload)
+            logger.info("User profile saved to Firestore for %s", user_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to save user profile for %s: %s", user_id, e)
+            return False
+
+    async def get_user_profile(self, user_id: str) -> Optional[dict]:
+        """Retrieve the latest skill profile for a user, or None for first-time users."""
+        if self._enabled and self._client is not None:
+            try:
+                doc_ref = self._client.collection(PROFILES_COLLECTION).document(user_id)
+                doc = await doc_ref.get()
+                if doc.exists:
+                    payload = doc.to_dict() or {}
+                    self._user_profiles[user_id] = payload
+                    return deepcopy(payload)
+            except Exception as e:
+                logger.error("Failed to fetch user profile for %s: %s", user_id, e)
+
+        cached = self._user_profiles.get(user_id)
         return deepcopy(cached) if cached else None
 
     async def list_recent(self, limit: int = 20, user_id: Optional[str] = None) -> list[dict]:

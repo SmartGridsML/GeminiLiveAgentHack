@@ -129,10 +129,16 @@
             <span>Screen-aware coaching</span>
           </label>
 
-          <label class="config-toggle">
+          <label class="config-toggle" title="Reduces cooldowns for demonstration — enables more frequent coaching interruptions">
             <input id="demo-mode-toggle" type="checkbox" />
             <span>Deterministic demo mode</span>
           </label>
+        </div>
+
+        <!-- Agent telemetry bar — shows live tool/agent calls for judges -->
+        <div id="agent-telemetry" class="agent-telemetry hidden">
+          <div class="telemetry-label">Agent Activity</div>
+          <div id="telemetry-feed" class="telemetry-feed"></div>
         </div>
 
         <!-- Live metrics bar -->
@@ -231,6 +237,13 @@
               <div class="step-info">
                 <span class="step-name">Synthesis Agent</span>
                 <span class="step-tag">final report</span>
+              </div>
+            </div>
+            <div class="pipeline-step" id="step-memory">
+              <span class="step-dot spinning"></span>
+              <div class="step-info">
+                <span class="step-name">Memory Agent</span>
+                <span class="step-tag">user profile · cross-session learning</span>
               </div>
             </div>
           </div>

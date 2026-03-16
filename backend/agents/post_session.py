@@ -12,13 +12,20 @@ Architecture:
     │     ├── pipeline_step: delivery_done  ← sent when delivery finishes
     │     ├── pipeline_step: content_done   ← sent when content finishes
     │     └── pipeline_step: research_done  ← sent when research finishes
-    └── SYNTHESIS_AGENT (runs after all three)
-          └── pipeline_step: synthesis_done ← sent before analysis_complete
+    ├── SYNTHESIS_AGENT (runs after all three)
+    │     └── pipeline_step: synthesis_done ← sent before analysis_complete
+    └── SESSION_SUMMARY_AGENT (runs after synthesis)
+          └── pipeline_step: memory_updated ← writes structured user profile
+
+ADK pipeline objects (PARALLEL_ANALYSTS, POST_SESSION_PIPELINE) make the
+multi-agent architecture explicit. main.py uses manual asyncio.gather for
+real-time WebSocket step events; POST_SESSION_PIPELINE is available for
+direct invocation in non-streaming contexts.
 
 google_search cannot be mixed with function tools on the same agent,
 so RESEARCH_AGENT is isolated with only google_search.
 """
-from google.adk.agents import LlmAgent
+from google.adk.agents import LlmAgent, ParallelAgent, SequentialAgent
 from google.adk.tools import google_search
 
 from backend.coach import ANALYSIS_MODEL
@@ -144,7 +151,7 @@ IMAGE_PROMPT_1: [Description of a clean, professional slide for the 'Core Messag
 IMAGE_PROMPT_2: [Description of a clean, professional slide for the 'Solution' or 'Data' section.]
 
 **SCORES**
-After the image prompts, output these 5 quality scores as plain integers (no brackets, no extra text):
+Output these 5 quality scores as plain integers — NO brackets, NO extra text on the score lines:
 SCORE_FILLER: [0–100; 100=zero fillers; 80=1-2 total; 60=3-5 total; 40=6-10 total; 20=11+; scale by session length]
 SCORE_PACE: [0–100; 100=smooth/measured throughout; 80=minor inconsistency; 60=noticeable rushing or dragging; 40=frequent choppy bursts or long pauses; 20=erratic/unintelligible]
 SCORE_EYE: [0–100; 100=no drops flagged; 80=1 brief drop; 60=2-3 drops; 40=4+ drops; 20=persistent camera avoidance]
@@ -154,7 +161,47 @@ SCORE_VISUAL: [0–100; 100=no slide issues or no slides used; 80=minor clutter;
 Rules:
 - Quote the transcript to support every claim
 - Never use vague language like "consider improving" — say exactly what to do
-- Keep the full report under 450 words
+- All seven prose sections plus IMAGE_PROMPTS and SCORES are required — do not truncate
 - No intro sentence, no concluding sentence — go straight into sections""",
     output_key="final_report",
+)
+
+SESSION_SUMMARY_AGENT = LlmAgent(
+    name="session_summary_agent",
+    model=ANALYSIS_MODEL,
+    instruction="""Given this session's coaching events, AI scores, and synthesis report,
+output a compact JSON skill profile for this presenter. Output ONLY valid JSON, no markdown fences:
+
+{
+  "recurring_issues": ["filler_words", "pace"],
+  "strengths": ["eye_contact"],
+  "trajectory": "First session. Pace and filler words are primary targets.",
+  "next_focus": "reduce_fillers",
+  "session_score": 72
+}
+
+Rules:
+- recurring_issues: event_types from coaching events (use underscore form: filler_words not filler)
+- strengths: dimensions scoring >= 80 (filler_words / pace / eye_contact / clarity / visual_delivery)
+- trajectory: 1 sentence comparing to prior sessions if visible in context, else note this is session 1
+- next_focus: one of: reduce_fillers / improve_pacing / improve_eye_contact / improve_structure / improve_clarity
+- session_score: integer 0-100 from the overall scorecard
+- Output ONLY the JSON object — no commentary, no code fences, no explanation""",
+    output_key="session_profile_json",
+)
+
+# ── ADK pipeline declarations ──────────────────────────────────────────────
+# These objects make the multi-agent coordination structure explicit for
+# architecture reviewers. main.py uses manual asyncio.gather to preserve
+# real-time pipeline_step WebSocket events; POST_SESSION_PIPELINE is
+# available for direct invocation in non-streaming contexts.
+
+PARALLEL_ANALYSTS = ParallelAgent(
+    name="parallel_analysts",
+    sub_agents=[DELIVERY_ANALYST, CONTENT_ANALYST, RESEARCH_AGENT],
+)
+
+POST_SESSION_PIPELINE = SequentialAgent(
+    name="post_session_pipeline",
+    sub_agents=[PARALLEL_ANALYSTS, SYNTHESIS_AGENT, SESSION_SUMMARY_AGENT],
 )

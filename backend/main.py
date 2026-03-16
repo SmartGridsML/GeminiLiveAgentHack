@@ -29,9 +29,12 @@ import ipaddress
 import json
 import hashlib
 import logging
+import math
 import re
+import sys
 import time
 import uuid
+from array import array
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -60,7 +63,10 @@ from backend.coach import (
 from backend.agents.post_session import (
     CONTENT_ANALYST,
     DELIVERY_ANALYST,
+    PARALLEL_ANALYSTS,
+    POST_SESSION_PIPELINE,
     RESEARCH_AGENT,
+    SESSION_SUMMARY_AGENT,
     SYNTHESIS_AGENT,
 )
 from backend.db import get_db
@@ -103,12 +109,14 @@ POST_APP_NAME = "pitchmirror_post"
 # refire before the per-type gate would have expired. Previous value of 28s
 # was shorter than the global tool cooldown, allowing repeated identical
 # feedback when the user paused for ≥30s between breaks.
-COACH_SPEECH_COOLDOWN_S = 45.0
+COACH_SPEECH_COOLDOWN_S = 30.0
+CONFIRMED_ISSUE_WINDOW_S = 14.0
 
 # Hard word-count cap per coach turn.  The system prompt says "4-10 words,
 # never above 12" — this server-side gate enforces that even if the model
 # ignores the instruction and produces a longer response.
-MAX_COACH_WORDS_PER_TURN = 20
+MAX_COACH_WORDS_PER_TURN = 14
+_PROSODY_SPEECH_RMS_MIN = 0.010
 
 # ── Singletons (created once at startup) ─────────────────────────
 
@@ -261,6 +269,86 @@ def _sanitize_transcript_text(text: str | None) -> str:
     clean = _ASR_TAG_RE.sub(" ", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
+
+
+def _decode_pcm16_le(payload: bytes) -> array:
+    pcm = array("h")
+    if not payload:
+        return pcm
+    pcm.frombytes(payload)
+    if sys.byteorder != "little":
+        pcm.byteswap()
+    return pcm
+
+
+def _estimate_pitch_hz(samples: array, sample_rate: int = 16000) -> float | None:
+    # Lightweight autocorrelation pitch estimate tuned for 100ms speech chunks.
+    if len(samples) < 400:
+        return None
+    down = [float(samples[i]) for i in range(0, len(samples), 2)]
+    if len(down) < 180:
+        return None
+    sr = sample_rate // 2
+    mean = sum(down) / len(down)
+    centered = [x - mean for x in down]
+    energy = sum(x * x for x in centered)
+    if energy <= 1e7:
+        return None
+
+    min_lag = max(8, sr // 320)   # ~320 Hz
+    max_lag = min(len(centered) - 1, sr // 80)  # ~80 Hz
+    if max_lag <= min_lag:
+        return None
+
+    best_lag = 0
+    best_corr = 0.0
+    for lag in range(min_lag, max_lag + 1):
+        num = 0.0
+        den1 = 0.0
+        den2 = 0.0
+        lim = len(centered) - lag
+        for i in range(lim):
+            a = centered[i]
+            b = centered[i + lag]
+            num += a * b
+            den1 += a * a
+            den2 += b * b
+        if den1 <= 0.0 or den2 <= 0.0:
+            continue
+        corr = num / math.sqrt(den1 * den2)
+        if corr > best_corr:
+            best_corr = corr
+            best_lag = lag
+
+    if best_lag <= 0 or best_corr < 0.25:
+        return None
+    pitch = sr / float(best_lag)
+    if 75.0 <= pitch <= 340.0:
+        return pitch
+    return None
+
+
+def _audio_chunk_features(payload: bytes) -> dict:
+    pcm = _decode_pcm16_le(payload)
+    n = len(pcm)
+    if n == 0:
+        return {"rms": 0.0, "speech": False, "pitch_hz": None, "duration_s": 0.0}
+
+    inv = 1.0 / 32768.0
+    sum_sq = 0.0
+    for s in pcm:
+        x = float(s) * inv
+        sum_sq += x * x
+    rms = math.sqrt(sum_sq / n) if n else 0.0
+    speech = rms >= _PROSODY_SPEECH_RMS_MIN
+    pitch = _estimate_pitch_hz(pcm) if speech else None
+    duration_s = n / 16000.0
+    return {
+        "rms": round(rms, 5),
+        "speech": speech,
+        "pitch_hz": round(pitch, 1) if pitch else None,
+        "duration_s": round(duration_s, 4),
+    }
 
 
 def _request_user_scope(request: Request) -> str:
@@ -447,6 +535,12 @@ CORS_ALLOWED_ORIGINS = _csv_env("CORS_ALLOWED_ORIGINS", "*")
 _CORS_ALLOW_CREDENTIALS = CORS_ALLOWED_ORIGINS != ["*"]
 API_BEARER_TOKEN = os.getenv("API_BEARER_TOKEN", "").strip()
 AUTH_ENABLED = bool(API_BEARER_TOKEN)
+
+if ENVIRONMENT == "production" and not API_BEARER_TOKEN:
+    raise RuntimeError(
+        "API_BEARER_TOKEN must be set in production. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
 
 
 def _extract_auth_token(
@@ -682,17 +776,29 @@ def _session_summary(payload: dict) -> dict:
 
 
 async def _fetch_user_history(user_id: str, limit: int = 1) -> str:
-    """Fetch recent session data to use as cached context."""
+    """Fetch prior session context: structured profile first, raw report excerpt as fallback."""
     try:
+        # Prefer structured cross-session profile (written by SESSION_SUMMARY_AGENT)
+        profile = await _db.get_user_profile(user_id)
+        if profile:
+            issues = ", ".join(profile.get("recurring_issues") or []) or "none identified"
+            strengths = ", ".join(profile.get("strengths") or []) or "none identified"
+            return (
+                f"Prior session profile — score: {profile.get('session_score', 0)}/100\n"
+                f"Recurring issues: {issues}\n"
+                f"Strengths: {strengths}\n"
+                f"Trajectory: {profile.get('trajectory', '')}\n"
+                f"Recommended focus: {profile.get('next_focus', 'balanced')}"
+            )
+
+        # First-time user — fall back to raw report excerpt
         sessions = await _db.list_recent(limit=limit, user_id=user_id)
         if not sessions:
             return ""
-
         blocks = []
         for s in sessions:
             score = s.get("overall_score", 0)
             report = s.get("final_report", "")
-            # Only use the top fixes / summary part of the report to keep it concise
             summary = report.split("**Delivery**")[0].strip() if "**Delivery**" in report else report[:300]
             blocks.append(f"- Previous session (Score: {score}/100):\n{summary}")
         return "\n\n".join(blocks)
@@ -823,6 +929,17 @@ async def websocket_endpoint(websocket: WebSocket):
         total_slides=total_slides,
         current_slide_index=0,
     )
+    state.record_timeline(
+        "session",
+        "Session connected",
+        {
+            "mode": state.coach_mode,
+            "context": state.delivery_context,
+            "goal": state.primary_goal,
+            "screen_enabled": state.screen_enabled,
+            "demo_mode": state.demo_mode,
+        },
+    )
     live_request_queue = LiveRequestQueue()
 
     try:
@@ -853,21 +970,31 @@ async def websocket_endpoint(websocket: WebSocket):
             "has_uploaded_slides": state.total_slides > 0,
         })
 
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(
-                _upstream(websocket, live_request_queue, state),
-                name="upstream",
-            )
-            tg.create_task(
-                _downstream(websocket, live_runner, user_id, session_id,
-                             live_request_queue, run_config, state),
-                name="downstream",
-            )
-            tg.create_task(
-                _drain_tool_events(websocket, state),
-                name="tool_events",
-            )
+        async with asyncio.timeout(900):   # 15-min hard limit per session
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    _upstream(websocket, live_request_queue, state),
+                    name="upstream",
+                )
+                tg.create_task(
+                    _downstream(websocket, live_runner, user_id, session_id,
+                                 live_request_queue, run_config, state),
+                    name="downstream",
+                )
+                tg.create_task(
+                    _drain_tool_events(websocket, state),
+                    name="tool_events",
+                )
+                if state.demo_mode:
+                    tg.create_task(
+                        _demo_seed_scheduler(websocket, state),
+                        name="demo_scheduler",
+                    )
 
+    except asyncio.TimeoutError:
+        logger.warning("Session %s exceeded 15-minute limit — closing", session_id)
+        await _safe_send(websocket, {"type": "status", "state": "session_timeout"})
+        await websocket.close()
     except WebSocketDisconnect:
         logger.info(f"Browser disconnected: {session_id}")
     except BaseException as exc:
@@ -943,6 +1070,28 @@ async def _upstream(
                     live_request_queue.send_realtime(
                         types.Blob(data=payload, mime_type="audio/pcm;rate=16000")
                     )
+                    features = _audio_chunk_features(payload)
+                    prosody = state.update_prosody(
+                        rms=features["rms"],
+                        pitch_hz=features["pitch_hz"],
+                        speech_active=features["speech"],
+                        chunk_duration_s=features["duration_s"] or 0.1,
+                    )
+                    if prosody.get("voiced_seconds_20s", 0.0) >= 6.0:
+                        if prosody.get("pause_ratio_20s", 1.0) < 0.10:
+                            state.record_signal(
+                                "pause_low",
+                                measured=prosody.get("pause_ratio_20s"),
+                                threshold="<0.10",
+                                source="raw_audio",
+                            )
+                        if prosody.get("monotony_score", 0.0) >= 70.0:
+                            state.record_signal(
+                                "monotony_high",
+                                measured=prosody.get("monotony_score"),
+                                threshold=">=70",
+                                source="raw_audio",
+                            )
                 elif msg_type == _T_VIDEO_IN:
                     live_request_queue.send_realtime(
                         types.Blob(data=payload, mime_type="image/jpeg")
@@ -953,13 +1102,18 @@ async def _upstream(
                     live_request_queue.send_realtime(
                         types.Blob(data=payload, mime_type="image/jpeg")
                     )
+                    # Cache for slide before/after visual hint
+                    state.last_slide_frame_b64 = base64.b64encode(payload).decode("ascii")
                 elif msg_type == _T_SLIDE_IN:
                     # Uploaded slide frames are streamed when the user/agent changes slides.
                     live_request_queue.send_realtime(
                         types.Blob(data=payload, mime_type="image/jpeg")
                     )
+                    # Cache as before-frame for visual hint redesign comparison
+                    state.last_slide_frame_b64 = base64.b64encode(payload).decode("ascii")
                 elif msg_type == _T_STOP:
                     logger.info(f"Stop signal received: {state.session_id}")
+                    state.record_timeline("session", "User ended session")
                     break
                 else:
                     logger.warning("Unsupported WS binary frame type=%s session=%s", msg_type, state.session_id)
@@ -999,6 +1153,60 @@ async def _upstream(
         live_request_queue.close()
 
 
+async def _demo_seed_scheduler(websocket: WebSocket, state: SessionState):
+    """
+    Demo-mode reliability helper.
+    Ensures three visible checkpoints appear in the first ~90 seconds even when
+    the model chooses not to interrupt on its own.
+    """
+    if not state.demo_mode:
+        return
+
+    start = time.monotonic()
+    checkpoints = [
+        (
+            30.0,
+            "pace_flag",
+            lambda: state.pace_violations > 0,
+            "Demo checkpoint: trigger pace coaching with one 15s fast segment.",
+        ),
+        (
+            60.0,
+            "slide_flag",
+            lambda: (state.visual_flags + state.mismatch_flags) > 0,
+            "Demo checkpoint: move to a dense slide so slide critique triggers.",
+        ),
+        (
+            85.0,
+            "visual_hint",
+            lambda: state.live_visual_hints_ready > 0,
+            "Demo checkpoint: ask for an improved slide visual hint now.",
+        ),
+    ]
+
+    for target_s, seed, completed, message in checkpoints:
+        wait_s = target_s - (time.monotonic() - start)
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+        if not state.is_active:
+            return
+        if completed():
+            continue
+
+        payload = {"seed": seed, "message": message}
+        state.record_timeline("demo_seed", message, payload)
+        await _safe_send(websocket, {"type": "demo_seed", **payload})
+        await _safe_send(
+            websocket,
+            {
+                "type": "telemetry",
+                "phase": "demo_checkpoint",
+                "detail": seed,
+                "data": payload,
+            },
+        )
+
+
 async def _downstream(
     websocket: WebSocket,
     runner: Runner,
@@ -1028,6 +1236,16 @@ async def _downstream(
         if new_state != current_status:
             current_status = new_state
             await websocket.send_json({"type": "status", "state": new_state})
+            state.record_timeline("status", f"Status: {new_state}")
+            await _safe_send(
+                websocket,
+                {
+                    "type": "telemetry",
+                    "phase": "status",
+                    "detail": new_state,
+                    "data": {"session_id": state.session_id},
+                },
+            )
 
     await _emit_status("listening")
 
@@ -1065,6 +1283,18 @@ async def _downstream(
             _reply_action,
             _reply_reason,
         )
+        state._enqueue(
+            {
+                "type": "telemetry",
+                "phase": "coach_reply_start",
+                "detail": reason,
+                "data": {
+                    "turn": _turn_index,
+                    "reply": _reply_index,
+                    "action": action,
+                },
+            }
+        )
 
     def _end_reply(trigger: str) -> None:
         nonlocal _reply_started_at, _reply_chunks, _reply_bytes
@@ -1084,6 +1314,21 @@ async def _downstream(
             _reply_bytes,
             duration_ms,
         )
+        state._enqueue(
+            {
+                "type": "telemetry",
+                "phase": "coach_reply_end",
+                "detail": trigger,
+                "data": {
+                    "turn": _turn_index,
+                    "reply": _reply_index,
+                    "action": _reply_action,
+                    "chunks": _reply_chunks,
+                    "bytes": _reply_bytes,
+                    "duration_ms": duration_ms,
+                },
+            }
+        )
         _reply_started_at = 0.0
         _reply_chunks = 0
         _reply_bytes = 0
@@ -1091,6 +1336,15 @@ async def _downstream(
         _reply_reason = "unknown"
 
     try:
+        await _safe_send(
+            websocket,
+            {
+                "type": "telemetry",
+                "phase": "model_connect",
+                "detail": "run_live_started",
+                "data": {"model": str(getattr(getattr(runner, "agent", None), "model", "unknown"))},
+            },
+        )
         async for event in runner.run_live(
             user_id=user_id,
             session_id=session_id,
@@ -1113,15 +1367,27 @@ async def _downstream(
                             # First speech in this turn — evaluate cooldown.
                             now = time.monotonic()
                             elapsed = now - state.last_coach_speech_time
-                            if elapsed >= COACH_SPEECH_COOLDOWN_S:
+                            issue_age = (
+                                now - state.last_confirmed_issue_time
+                                if state.last_confirmed_issue_time > 0
+                                else 9e9
+                            )
+                            has_recent_confirmed_issue = (
+                                state.last_confirmed_issue_time > 0
+                                and issue_age <= CONFIRMED_ISSUE_WINDOW_S
+                            )
+                            if elapsed >= COACH_SPEECH_COOLDOWN_S and has_recent_confirmed_issue:
                                 _suppress_turn = False
                                 _turn_committed = True
                                 state.last_coach_speech_time = now
-                                _start_reply("allowed", "cooldown_pass")
+                                _start_reply(
+                                    "allowed",
+                                    f"cooldown_pass_issue={state.last_confirmed_issue_type or 'unknown'}",
+                                )
                                 logger.debug(
                                     "Coach speech allowed (%.1fs since last)", elapsed
                                 )
-                            else:
+                            elif elapsed < COACH_SPEECH_COOLDOWN_S:
                                 _suppress_turn = True
                                 _turn_committed = True
                                 _start_reply(
@@ -1131,6 +1397,18 @@ async def _downstream(
                                 logger.info(
                                     "Coach speech suppressed — cooldown %.0fs remaining (session=%s)",
                                     COACH_SPEECH_COOLDOWN_S - elapsed,
+                                    state.session_id,
+                                )
+                            else:
+                                _suppress_turn = True
+                                _turn_committed = True
+                                _start_reply(
+                                    "suppressed",
+                                    f"no_recent_confirmed_issue_{int(issue_age)}s",
+                                )
+                                logger.info(
+                                    "Coach speech suppressed — no confirmed issue in window (age=%.1fs, session=%s)",
+                                    issue_age,
                                     state.session_id,
                                 )
                         else:
@@ -1198,16 +1476,20 @@ async def _downstream(
                             _reply_preview_logged = True
                         state.add_transcript("coach", text)
                         await websocket.send_json({"type": "transcript", "speaker": "coach", "text": text})
-                    elif not _reply_preview_logged:
-                        preview = text if len(text) <= 120 else f"{text[:117]}..."
-                        logger.info(
-                            "coach_reply_text_suppressed session=%s turn=%d reply=%d preview=%r",
-                            state.session_id,
-                            _turn_index,
-                            _reply_index,
-                            preview,
-                        )
-                        _reply_preview_logged = True
+                    else:
+                        # Suppressed turn: still record what the coach said so the
+                        # synthesis agent can reference it in the delivery analysis.
+                        state.add_transcript("coach", text)
+                        if not _reply_preview_logged:
+                            preview = text if len(text) <= 120 else f"{text[:117]}..."
+                            logger.info(
+                                "coach_reply_text_suppressed session=%s turn=%d reply=%d preview=%r",
+                                state.session_id,
+                                _turn_index,
+                                _reply_index,
+                                preview,
+                            )
+                            _reply_preview_logged = True
 
             # ── Turn complete — reset per-turn gate ────────────────────
             if event.turn_complete:
@@ -1336,6 +1618,11 @@ async def _run_post_session(websocket: WebSocket, state: SessionState):
         return
 
     await _safe_send(websocket, {"type": "status", "state": "analyzing"})
+    await _safe_send(
+        websocket,
+        {"type": "telemetry", "phase": "post_session", "detail": "pipeline_start", "data": {}},
+    )
+    state.record_timeline("pipeline", "Post-session pipeline started")
     context = _build_context_message(state)
 
     # ── Parallel phase: three agents run concurrently ─────────────
@@ -1343,21 +1630,45 @@ async def _run_post_session(websocket: WebSocket, state: SessionState):
     # can mark that step done in real time rather than using fake timers.
 
     async def run_delivery() -> str:
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "delivery_start", "data": {"agent": "delivery_analyst"}},
+        )
         # min_chars=100 ensures the agent didn't return a fragment; retry once if so
         result = await _run_with_validation(DELIVERY_ANALYST, context, min_chars=100)
         await _safe_send(websocket, {"type": "pipeline_step", "step": "delivery_done"})
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "delivery_done", "data": {"agent": "delivery_analyst"}},
+        )
         logger.info("Post-session delivery analysis done: %s", state.session_id)
         return result
 
     async def run_content() -> str:
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "content_start", "data": {"agent": "content_analyst"}},
+        )
         result = await _run_with_validation(CONTENT_ANALYST, context, min_chars=100)
         await _safe_send(websocket, {"type": "pipeline_step", "step": "content_done"})
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "content_done", "data": {"agent": "content_analyst"}},
+        )
         logger.info("Post-session content analysis done: %s", state.session_id)
         return result
 
     async def run_research() -> str:
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "research_start", "data": {"agent": "research_agent"}},
+        )
         result = await _run_with_validation(RESEARCH_AGENT, context, min_chars=60)
         await _safe_send(websocket, {"type": "pipeline_step", "step": "research_done"})
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "research_done", "data": {"agent": "research_agent"}},
+        )
         logger.info("Post-session research done: %s", state.session_id)
         return result
 
@@ -1428,11 +1739,42 @@ async def _run_post_session(websocket: WebSocket, state: SessionState):
             state.session_id, len(state.ai_scores),
         )
     await _safe_send(websocket, {"type": "pipeline_step", "step": "synthesis_done"})
+    await _safe_send(
+        websocket,
+        {"type": "telemetry", "phase": "agent_step", "detail": "synthesis_done", "data": {"agent": "synthesis_agent"}},
+    )
     logger.info("Post-session synthesis done: %s", state.session_id)
+
+    # ── Session summary agent: write cross-session user skill profile ───
+    try:
+        profile_context = (
+            f"{synthesis_context}\n\n"
+            f"SYNTHESIS REPORT:\n{final_report_raw or ''}\n\n"
+            f"AI SCORES: {state.ai_scores}\n"
+        )
+        profile_json_str = await _run_single_agent(SESSION_SUMMARY_AGENT, profile_context)
+        if profile_json_str:
+            import json as _json
+            profile = _json.loads(profile_json_str.strip())
+            scorecard_preview = build_scorecard(state)
+            profile["session_score"] = int(scorecard_preview.get("overall_score", 0))
+            await _db.save_user_profile(state.user_id, profile)
+            await _safe_send(websocket, {"type": "pipeline_step", "step": "memory_updated"})
+            await _safe_send(
+                websocket,
+                {"type": "telemetry", "phase": "agent_step", "detail": "memory_updated", "data": {"agent": "session_summary_agent"}},
+            )
+            logger.info("User profile updated for %s: %s", state.user_id, profile)
+    except Exception as e:
+        logger.warning("Session profile parse/save failed for %s: %s", state.session_id, e)
 
     generated_assets: list[dict] = []
     if ENABLE_IMAGE_GENERATION:
         await _safe_send(websocket, {"type": "pipeline_step", "step": "visuals_start"})
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "visuals_start", "data": {"agent": "imagen_pipeline"}},
+        )
         generated_assets = await generate_session_assets(
             state,
             final_report,
@@ -1441,6 +1783,10 @@ async def _run_post_session(websocket: WebSocket, state: SessionState):
             retries=IMAGE_GENERATION_RETRIES,
         )
         await _safe_send(websocket, {"type": "pipeline_step", "step": "visuals_done"})
+        await _safe_send(
+            websocket,
+            {"type": "telemetry", "phase": "agent_step", "detail": "visuals_done", "data": {"agent": "imagen_pipeline"}},
+        )
 
     state.final_report = final_report
     state.research_tips = research_out
@@ -1450,7 +1796,19 @@ async def _run_post_session(websocket: WebSocket, state: SessionState):
         "report": final_report,
         "research_tips": research_out,   # raw output for citation card rendering
         "generated_assets": generated_assets,
+        "agents_used": [
+            "delivery_analyst",
+            "content_analyst",
+            "research_agent (google_search)",
+            "synthesis_agent",
+            "session_summary_agent",
+        ],
     })
+    await _safe_send(
+        websocket,
+        {"type": "telemetry", "phase": "post_session", "detail": "pipeline_complete", "data": {}},
+    )
+    state.record_timeline("pipeline", "Post-session pipeline complete")
     logger.info(f"Post-session analysis complete: {state.session_id}")
 
 
@@ -1467,10 +1825,12 @@ def _build_context_message(state: SessionState) -> str:
         f"DEMO MODE: {state.demo_mode}\n\n"
         f"SESSION TRANSCRIPT:\n{state.transcript_text()}\n\n"
         f"COACHING EVENTS (tool calls during live session):\n{state.events_json()}\n\n"
+        f"TIMELINE EVENTS (for replay):\n{state.timeline_json()}\n\n"
         f"METRICS: fillers={state.filler_count} eye_drops={state.eye_contact_drops} "
         f"pace={state.pace_violations} contradictions={state.contradictions} "
         f"clarity={state.clarity_flags} slide_clarity={state.visual_flags} "
-        f"slide_mismatch={state.mismatch_flags} duration={round(state.duration_seconds())}s\n\n"
+        f"slide_mismatch={state.mismatch_flags} duration={round(state.duration_seconds())}s\n"
+        f"PROSODY: {state.prosody_metrics}\n\n"
         "Analyze this session and provide coaching as instructed."
     )
 

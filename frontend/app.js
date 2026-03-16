@@ -132,6 +132,7 @@ let _lastUserLine = { normalized: '', at: 0 };
 /* Session recovery — used to re-fetch scorecard if WS closes during analysis */
 let _currentSessionId = null;
 let _waitingForScorecard = false;
+let _replayTimeline = { markers: [], duration: 0 };
 
 /* ── DOM refs ────────────────────────────────────── */
 const video           = document.getElementById('local-video');
@@ -578,6 +579,7 @@ async function startSession() {
   if (screenShareToggle) screenShareToggle.disabled = true;
   if (demoModeToggle) demoModeToggle.disabled = true;
   liveMetrics.classList.remove('hidden');
+  if (_agentTelemetry) { _agentTelemetry.classList.remove('hidden'); _telemetryHistory.length = 0; }
   videoOverlay.classList.remove('hidden');
   recIndicator.classList.remove('hidden');
   transcriptFeed.innerHTML = '';
@@ -586,6 +588,7 @@ async function startSession() {
   _lastUserLine  = { normalized: '', at: 0 };
   _currentSessionId = null;
   _waitingForScorecard = false;
+  _replayTimeline = { markers: [], duration: 0 };
   window._analysisReport = null;
   window._researchTips   = null;
   window._generatedAssets = null;
@@ -917,6 +920,20 @@ function handleServerMessage(event) {
         }
       }
       showToolCallEvent(msg.tool, msg.args);
+      updateTelemetry(msg.tool, msg.args);
+      break;
+
+    case 'telemetry':
+      updateTelemetryEvent(msg);
+      break;
+
+    case 'demo_seed':
+      showDemoSeedEvent(msg);
+      updateTelemetryEvent({
+        phase: 'demo_checkpoint',
+        detail: msg.seed || 'checkpoint',
+        data: { message: msg.message || '' },
+      });
       break;
 
     case 'slide_mark':
@@ -951,6 +968,7 @@ function handleServerMessage(event) {
         content_done:   'step-content',
         research_done:  'step-research',
         synthesis_done: 'step-synthesis',
+        memory_updated: 'step-memory',
       };
       const stepId = stepMap[msg.step];
       if (stepId) markPipelineStepDone(stepId);
@@ -965,8 +983,9 @@ function handleServerMessage(event) {
       window._analysisReport = msg.report;
       window._researchTips   = msg.research_tips || '';
       window._generatedAssets = msg.generated_assets || [];
+      window._agentsUsed = msg.agents_used || [];
       // Ensure all steps are visually done (fallback for any missed pipeline_step events)
-      ['step-delivery', 'step-content', 'step-research', 'step-synthesis'].forEach(markPipelineStepDone);
+      ['step-delivery', 'step-content', 'step-research', 'step-synthesis', 'step-memory'].forEach(markPipelineStepDone);
       setTimeout(() => document.getElementById('analysis-panel').classList.add('hidden'), 900);
       break;
     }
@@ -993,12 +1012,13 @@ function handleStatus(state, message) {
   if (state === 'analyzing') {
     _waitingForScorecard = true;
     liveMetrics.classList.add('hidden');
+    if (_agentTelemetry) _agentTelemetry.classList.add('hidden');
     recIndicator.classList.add('hidden');
     document.getElementById('transcript-panel').classList.add('hidden');
     document.getElementById('analysis-panel').classList.remove('hidden');
 
     // Reset all steps to spinning — real completion events drive the done state
-    ['step-delivery', 'step-content', 'step-research', 'step-synthesis'].forEach(id => {
+    ['step-delivery', 'step-content', 'step-research', 'step-synthesis', 'step-memory'].forEach(id => {
       const step = document.getElementById(id);
       if (!step) return;
       step.classList.remove('done');
@@ -1278,6 +1298,68 @@ function showToolCallEvent(tool, args) {
   transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
 }
 
+/* ── Architecture telemetry overlay ─────────────── */
+const _telemetryHistory = [];   // rolling last-N telemetry rows
+const _telemetryFeed    = document.getElementById('telemetry-feed');
+const _agentTelemetry   = document.getElementById('agent-telemetry');
+
+function _appendTelemetryEntry(label, keyArg = '') {
+  if (!_telemetryFeed) return;
+  const now = new Date();
+  const ts  = `${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+
+  _telemetryHistory.push({ tool: label, keyArg, ts });
+  if (_telemetryHistory.length > 8) _telemetryHistory.shift();
+
+  _telemetryFeed.innerHTML = _telemetryHistory.map(e => `
+    <div class="telemetry-entry">
+      <span class="telemetry-ts">${escapeHtml(e.ts)}</span>
+      <span class="telemetry-tool">${escapeHtml(e.tool)}</span>
+      ${e.keyArg ? `<span class="telemetry-arg">${escapeHtml(e.keyArg)}</span>` : ''}
+    </div>
+  `).join('');
+}
+
+function updateTelemetry(tool, args) {
+  // Build a compact one-line summary for each tool
+  let keyArg = '';
+  if (tool === 'flag_issue') {
+    keyArg = args?.issue_type || '';
+  } else if (tool === 'get_speech_metrics') {
+    const wpm = args?.wpm_20s != null ? `${args.wpm_20s} WPM` : '';
+    const mono = args?.monotony_score != null ? `mono ${args.monotony_score}` : '';
+    keyArg = [wpm, mono].filter(Boolean).join(' · ');
+  } else if (tool === 'check_eye_contact') {
+    keyArg = args?.confirmed ? '✓' : '…';
+  } else if (tool === 'check_slide_clarity') {
+    keyArg = args?.signal || '';
+  } else if (tool === 'generate_live_visual_hint') {
+    keyArg = args?.hint_type || 'visual';
+  } else if (tool === 'jump_to_slide') {
+    keyArg = args?.index != null ? `→${Number(args.index) + 1}` : '';
+  } else if (tool === 'mark_slide_issue') {
+    keyArg = args?.issue_type || '';
+  }
+  _appendTelemetryEntry(tool, keyArg);
+}
+
+function updateTelemetryEvent(msg) {
+  const phase = String(msg?.phase || 'event');
+  const detail = String(msg?.detail || '');
+  let arg = detail;
+  const data = msg?.data || {};
+  if (phase === 'coach_reply_start') {
+    arg = `${detail}${data?.action ? ` · ${data.action}` : ''}`;
+  } else if (phase === 'agent_step') {
+    arg = `${detail}${data?.agent ? ` · ${data.agent}` : ''}`;
+  } else if (phase === 'status') {
+    arg = detail;
+  } else if (phase === 'demo_checkpoint') {
+    arg = data?.message ? String(data.message) : detail;
+  }
+  _appendTelemetryEntry(phase, arg);
+}
+
 /* ── Slide issue annotation ──────────────────────── */
 function showSlideMarkEvent(msg) {
   const issueLabels = {
@@ -1294,6 +1376,21 @@ function showSlideMarkEvent(msg) {
     <span class="transcript-text tool-text">
       <span class="tool-name">slide annotation</span>
       <span class="tool-arg">${escapeHtml(label + extra + slideNum)}</span>
+    </span>`;
+  const placeholder = transcriptFeed.querySelector('#welcome-panel');
+  if (placeholder) placeholder.remove();
+  transcriptFeed.appendChild(line);
+  transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+}
+
+function showDemoSeedEvent(msg) {
+  const line = document.createElement('div');
+  line.className = 'transcript-line tool-call';
+  line.innerHTML = `
+    <span class="transcript-speaker tool-speaker">DEMO</span>
+    <span class="transcript-text tool-text">
+      <span class="tool-name">checkpoint</span>
+      <span class="tool-desc">${escapeHtml(msg.message || 'Demo checkpoint')}</span>
     </span>`;
   const placeholder = transcriptFeed.querySelector('#welcome-panel');
   if (placeholder) placeholder.remove();
@@ -1332,16 +1429,38 @@ function handleLiveVisualHint(msg) {
     container.removeAttribute('id');
 
     const sourceLabel = msg.source === 'fallback' ? ' (fallback)' : '';
+    const afterSrc = `data:${msg.mime_type || 'image/jpeg'};base64,${msg.data_base64}`;
+    const hasBefore = !!msg.before_b64;
+    const beforeSrc = hasBefore ? `data:image/jpeg;base64,${msg.before_b64}` : '';
+    const rationale = (msg.rationale || '').trim();
+    const rationaleHtml = rationale ? `<div class="lv-rationale">${escapeHtml(rationale)}</div>` : '';
+
+    const imageContent = hasBefore
+      ? `<div class="lv-before-after">
+           <div class="lv-ba-col">
+             <div class="lv-ba-label">Before</div>
+             <img class="lv-image" src="${beforeSrc}" alt="Current slide" />
+           </div>
+           <div class="lv-ba-col">
+             <div class="lv-ba-label">Redesigned</div>
+             <img class="lv-image" src="${afterSrc}"
+                  alt="${escapeHtml(msg.title || 'Redesigned slide')}"
+                  onclick="openLiveVisualModal(this.src, ${JSON.stringify(msg.title || '')})" />
+           </div>
+         </div>`
+      : `<div class="lv-image-wrap">
+           <img class="lv-image" src="${afterSrc}"
+                alt="${escapeHtml(msg.title || 'Live visual hint')}"
+                onclick="openLiveVisualModal(this.src, ${JSON.stringify(msg.title || '')})" />
+         </div>`;
+
     container.innerHTML = `
       <span class="transcript-speaker tool-speaker">ADK</span>
       <span class="transcript-text tool-text lv-result">
         <span class="tool-name">live visual</span>
         <span class="tool-arg">${escapeHtml(msg.title || msg.hint_type)}${escapeHtml(sourceLabel)}</span>
-        <div class="lv-image-wrap">
-          <img class="lv-image" src="data:${msg.mime_type || 'image/jpeg'};base64,${msg.data_base64}"
-               alt="${escapeHtml(msg.title || 'Live visual hint')}"
-               onclick="openLiveVisualModal(this.src, ${JSON.stringify(msg.title || '')})" />
-        </div>
+        ${rationaleHtml}
+        ${imageContent}
       </span>`;
     if (!pending) transcriptFeed.appendChild(container);
     transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
@@ -1453,9 +1572,12 @@ function drawOverlayHighlight(x, y, label) {
 
 /* ── Star rating helpers ─────────────────────────── */
 
-/** Convert a 0-100 score to a 0-5 rating rounded to the nearest 0.5. */
+/** Convert a 0-100 score to a 0-5 rating floored to the nearest 0.5. */
 function scoreToStars(score) {
-  return Math.round(score / 10) / 2;
+  const safe = Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : 0;
+  // Floor to the nearest 0.5 so borderline scores (e.g. 95-99) don't render
+  // as a perfect 5.0 unless the backend score is truly 100.
+  return Math.floor((safe / 20) * 2) / 2;
 }
 
 /** Render 5 star spans with full / half / empty CSS classes. */
@@ -1483,9 +1605,14 @@ function renderScorecard(data) {
   const goalLabel = (data.primary_goal || 'balanced').replace('_', ' ');
 
   const overallStars = scoreToStars(score);
+  const scoreMeta = data.scoring || null;
+  const scoreMetaHtml = (scoreMeta && Number.isFinite(scoreMeta.base_score))
+    ? `<div class="scorecard-grade-breakdown">Base ${scoreMeta.base_score}/100 · Penalty -${Number(scoreMeta.event_penalty || 0).toFixed(1)}</div>`
+    : '';
 
   const categories = data.categories || {};
   const events = data.coaching_events || [];
+  const timelineHtml = renderReplayTimeline(data);
 
   // SVG score ring (arc reflects internal 0-100 percentage)
   const r = 52, cx = 60, cy = 60;
@@ -1506,11 +1633,15 @@ function renderScorecard(data) {
       pace: 'Pace',
       clarity: 'Clarity & Logic',
       visual_delivery: 'Slide Clarity',
+      prosody: 'Prosody',
     }[key] || key;
     const catStars = scoreToStars(cat.score);
     const detail = cat.count !== undefined ? `${cat.count} detected` :
                    cat.drops !== undefined ? `${cat.drops} drops` :
                    cat.violations !== undefined ? `${cat.violations} flags` :
+                   cat.monotony_score !== undefined
+                     ? `monotony ${Number(cat.monotony_score).toFixed(1)} · pause ${(Number(cat.pause_ratio_20s || 0) * 100).toFixed(0)}%`
+                     :
                    cat.slide_clarity_flags !== undefined ? `${cat.slide_clarity_flags + (cat.slide_mismatch_flags || 0)} visual issues` :
                    `${(cat.contradictions || 0) + (cat.flags || 0)} issues`;
     return `
@@ -1532,6 +1663,7 @@ function renderScorecard(data) {
         let evidenceChip = '';
         if (ev.metric && ev.threshold != null) {
           const parts = [ev.metric, ev.threshold];
+          if (ev.measured != null) parts.push(`measured: ${ev.measured}`);
           if (ev.session_total != null) parts.push(`session total: ${ev.session_total}`);
           if (ev.threshold_s    != null) parts.push(`≥${ev.threshold_s}s`);
           evidenceChip = `<span class="sc-event-evidence">${parts.map(escapeHtml).join(' · ')}</span>`;
@@ -1579,9 +1711,11 @@ function renderScorecard(data) {
         <div class="score-number ${gradeClass}">${overallStars.toFixed(1)}</div>
       </div>
       <div class="overall-stars">${renderStarRow(overallStars)}</div>
-      <div class="scorecard-grade-label">${gradeLabel} &middot; ${overallStars.toFixed(1)}&thinsp;/&thinsp;5 &middot; ${durationMin}:${String(durationSec).padStart(2,'0')} session &middot; ${escapeHtml(modeLabel)} &middot; ${escapeHtml(contextLabel)} &middot; goal: ${escapeHtml(goalLabel)}</div>
+      <div class="scorecard-grade-label">${gradeLabel} &middot; ${overallStars.toFixed(1)}&thinsp;/&thinsp;5 &middot; ${score.toFixed(1)}/100 &middot; ${durationMin}:${String(durationSec).padStart(2,'0')} session &middot; ${escapeHtml(modeLabel)} &middot; ${escapeHtml(contextLabel)} &middot; goal: ${escapeHtml(goalLabel)}</div>
+      ${scoreMetaHtml}
     </div>
     <div class="scorecard-categories">${catHtml}</div>
+    ${timelineHtml}
     <div class="scorecard-events">
       <div class="sc-events-title">Agent Coaching Events (${events.length})</div>
       ${eventsHtml}
@@ -1597,6 +1731,7 @@ function renderScorecard(data) {
 
   scorecardPanel.classList.remove('hidden');
   liveMetrics.classList.add('hidden');
+  if (_agentTelemetry) _agentTelemetry.classList.add('hidden');
   videoOverlay.classList.add('hidden');
 
   // Enable scrolling on right panel for tall scorecard and scroll to top
@@ -1614,6 +1749,84 @@ function renderScorecard(data) {
       requestAnimationFrame(() => { arc.style.strokeDashoffset = t; });
     }
   });
+
+  bindReplayTimeline();
+}
+
+function renderReplayTimeline(data) {
+  const duration = Math.max(1, Math.ceil(Number(data.duration_seconds || 0)));
+  const rawTimeline = Array.isArray(data.timeline_events) ? data.timeline_events : [];
+  const markers = rawTimeline
+    .map((e, idx) => {
+      const ts = Number(e.ts);
+      if (!Number.isFinite(ts)) return null;
+      const type = String(e.event_type || 'event');
+      return {
+        idx,
+        ts: Math.max(0, Math.min(duration, ts)),
+        type,
+        label: String(e.label || type),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.ts - b.ts)
+    .slice(0, 240)
+    .map((m, idx) => ({ ...m, idx }));
+
+  _replayTimeline = { markers, duration };
+  if (!markers.length) {
+    return '';
+  }
+
+  const markerHtml = markers.map((m, i) => {
+    const left = ((m.ts / duration) * 100).toFixed(2);
+    return `<span class="timeline-marker type-${escapeHtml(m.type)}" data-marker-index="${i}" style="left:${left}%"></span>`;
+  }).join('');
+
+  return `
+    <div class="replay-section">
+      <div class="sc-events-title">Session Replay Timeline</div>
+      <div class="replay-controls">
+        <input id="timeline-scrubber" class="timeline-scrubber" type="range" min="0" max="${duration}" step="1" value="0" />
+        <span id="timeline-time" class="timeline-time">0:00</span>
+      </div>
+      <div id="timeline-track" class="timeline-track">${markerHtml}</div>
+      <div id="timeline-detail" class="timeline-detail">Move the scrubber to inspect interruptions, signal spikes, and slide changes.</div>
+    </div>
+  `;
+}
+
+function bindReplayTimeline() {
+  const scrubber = document.getElementById('timeline-scrubber');
+  if (!scrubber || !_replayTimeline.markers.length) return;
+  const onUpdate = () => updateReplayTimeline(Number(scrubber.value || 0));
+  scrubber.addEventListener('input', onUpdate);
+  scrubber.addEventListener('change', onUpdate);
+  updateReplayTimeline(0);
+}
+
+function updateReplayTimeline(cursorS) {
+  const markers = _replayTimeline.markers || [];
+  const duration = _replayTimeline.duration || 1;
+  const timeEl = document.getElementById('timeline-time');
+  const detailEl = document.getElementById('timeline-detail');
+  if (timeEl) timeEl.textContent = formatTime(Math.max(0, Math.min(duration, cursorS)));
+  if (!detailEl || !markers.length) return;
+
+  let nearest = null;
+  for (const m of markers) {
+    if (m.ts <= cursorS + 0.5) nearest = m;
+    else break;
+  }
+  if (!nearest) nearest = markers[0];
+
+  const markerNodes = document.querySelectorAll('.timeline-marker');
+  markerNodes.forEach((el, idx) => {
+    el.classList.toggle('active', idx === nearest.idx);
+  });
+
+  const niceType = nearest.type.replace(/_/g, ' ');
+  detailEl.textContent = `${formatTime(nearest.ts)} · ${niceType} · ${nearest.label}`;
 }
 
 async function loadRecentSessions() {

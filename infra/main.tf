@@ -119,6 +119,9 @@ resource "google_cloud_run_v2_service" "pitchmirror" {
     # Each instance handles few long-lived WebSocket sessions — cap concurrency
     max_instance_request_concurrency = 10
 
+    # Match the asyncio.timeout(900) app-level guard so IaC and code agree
+    timeout_seconds = 900
+
     containers {
       image = var.container_image
 

@@ -78,14 +78,80 @@ def make_coaching_tools(state: "SessionState") -> list:
     _last_any: list[float] = [0.0]           # mutable cell so closure can write
     _last_by_type: dict[str, float] = {}
     _last_slide_signal: dict[str, float] = {}
+    # Late-binding ref: set after generate_live_visual_hint is defined so
+    # flag_issue can auto-trigger it on slide issues without relying on the model.
+    _visual_hint_fn: list = [None]
+    # Grounding gate: tracks last time a measurement tool was called.
+    # contradiction and clarity require recent grounding before flag_issue accepts them.
+    _last_grounding_time: list[float] = [0.0]
+    _GROUNDING_WINDOW_S = 90.0   # must have called a measurement tool within this window
+    _GROUNDING_REQUIRED_TYPES = frozenset({"contradiction", "clarity"})
+    _COMPOSITE_SIGNAL_WINDOW_S = 35.0
+    _SLIDE_SIGNAL_WINDOW_S = 45.0
     _valid_slide_signals = frozenset({
         "clutter",
         "unreadable_text",
         "weak_hierarchy",
         "speech_mismatch",
     })
-    global_cooldown_s = 18.0 if state.demo_mode else _GLOBAL_COOLDOWN_S
-    per_type_cooldown_s = 45.0 if state.demo_mode else _PER_TYPE_COOLDOWN_S
+    global_cooldown_s = 5.0 if state.demo_mode else _GLOBAL_COOLDOWN_S
+    per_type_cooldown_s = 20.0 if state.demo_mode else _PER_TYPE_COOLDOWN_S
+
+    def _emit_telemetry(phase: str, detail: str, data: dict | None = None) -> None:
+        state._enqueue({
+            "type": "telemetry",
+            "phase": phase,
+            "detail": detail,
+            "data": data or {},
+        })
+
+    def _confidence_gate(issue_type: str) -> dict:
+        """
+        Require composite evidence before interrupting.
+        This keeps interruptions precise and prevents "nagging AI" behavior.
+        """
+        if issue_type in {"pace", "filler"}:
+            candidates = ["pace_high", "filler_burst", "pause_low", "monotony_high"]
+            hits = state.has_recent_signals(candidates, window_s=_COMPOSITE_SIGNAL_WINDOW_S)
+            return {
+                "ok": len(hits) >= 2,
+                "window_s": _COMPOSITE_SIGNAL_WINDOW_S,
+                "required": candidates,
+                "hits": hits,
+            }
+
+        if issue_type in {"slide_clarity", "slide_mismatch"}:
+            all_hits = state.has_recent_signals(
+                [
+                    "slide_clutter",
+                    "slide_unreadable_text",
+                    "slide_weak_hierarchy",
+                    "slide_speech_mismatch",
+                ],
+                window_s=_SLIDE_SIGNAL_WINDOW_S,
+            )
+            structural = [h for h in all_hits if h != "slide_speech_mismatch"]
+            if issue_type == "slide_mismatch":
+                ok = ("slide_speech_mismatch" in all_hits) and len(all_hits) >= 2
+            else:
+                ok = bool(structural) and len(all_hits) >= 2
+            return {
+                "ok": ok,
+                "window_s": _SLIDE_SIGNAL_WINDOW_S,
+                "required": ["any 2 of slide_{clutter|unreadable_text|weak_hierarchy|speech_mismatch}"],
+                "hits": all_hits,
+            }
+
+        if issue_type == "eye_contact":
+            hits = state.has_recent_signals(["eye_contact_confirmed"], window_s=18.0)
+            return {
+                "ok": bool(hits),
+                "window_s": 18.0,
+                "required": ["eye_contact_confirmed"],
+                "hits": hits,
+            }
+
+        return {"ok": True, "window_s": 0.0, "required": [], "hits": []}
 
     def _compute_measured(issue_type: str) -> dict:
         """
@@ -165,9 +231,51 @@ def make_coaching_tools(state: "SessionState") -> list:
 
         now = time.monotonic()
 
+        # Confidence gate: subjective types require a recent measurement-tool call
+        # to ground the claim in observed evidence, not just model impressions.
+        if issue_type in _GROUNDING_REQUIRED_TYPES:
+            grounding_age = now - _last_grounding_time[0]
+            if grounding_age > _GROUNDING_WINDOW_S:
+                _emit_telemetry(
+                    "gate_blocked",
+                    "grounding_required",
+                    {"issue_type": issue_type, "grounding_age_s": round(grounding_age)},
+                )
+                return {
+                    "recorded": False,
+                    "reason": "grounding_required",
+                    "hint": "Call get_recent_transcript() first to ground the observation.",
+                    "grounding_age_s": round(grounding_age),
+                }
+
+        conf = _confidence_gate(issue_type)
+        if not conf.get("ok", False):
+            _emit_telemetry(
+                "gate_blocked",
+                "two_signal_gate",
+                {
+                    "issue_type": issue_type,
+                    "required": conf.get("required", []),
+                    "hits": conf.get("hits", []),
+                    "window_s": conf.get("window_s", 0),
+                },
+            )
+            return {
+                "recorded": False,
+                "reason": "two_signal_gate",
+                "required_signals": conf.get("required", []),
+                "observed_signals": conf.get("hits", []),
+                "window_s": conf.get("window_s", 0),
+            }
+
         # Hard gate: global cooldown across all issue types
         global_wait = global_cooldown_s - (now - _last_any[0])
         if global_wait > 0:
+            _emit_telemetry(
+                "gate_blocked",
+                "global_cooldown",
+                {"issue_type": issue_type, "wait_seconds": round(global_wait)},
+            )
             return {
                 "recorded": False,
                 "reason": "global_cooldown",
@@ -177,6 +285,11 @@ def make_coaching_tools(state: "SessionState") -> list:
         # Hard gate: per-type cooldown prevents repeating the same feedback
         type_wait = per_type_cooldown_s - (now - _last_by_type.get(issue_type, 0.0))
         if type_wait > 0:
+            _emit_telemetry(
+                "gate_blocked",
+                "type_cooldown",
+                {"issue_type": issue_type, "wait_seconds": round(type_wait)},
+            )
             return {
                 "recorded": False,
                 "reason": "type_cooldown",
@@ -189,8 +302,15 @@ def make_coaching_tools(state: "SessionState") -> list:
 
         # Compute measured evidence at trigger time — actual metric values, not a static map
         evidence = _compute_measured(issue_type)
+        evidence["confidence_signals"] = conf.get("hits", [])
 
         state.record_event(issue_type, description, evidence=evidence)
+        state.register_confirmed_issue(issue_type)
+        _emit_telemetry(
+            "interrupt_confirmed",
+            issue_type,
+            {"issue_type": issue_type, "signals": conf.get("hits", [])},
+        )
 
         # Push a visible tool-call event to the browser for architecture legibility
         state._enqueue({
@@ -198,6 +318,10 @@ def make_coaching_tools(state: "SessionState") -> list:
             "tool": "flag_issue",
             "args": {"issue_type": issue_type, "description": description, "evidence": evidence},
         })
+
+        # Hard-enforce visual hint on slide issues — don't rely on model variance
+        if issue_type in ("slide_clarity", "slide_mismatch") and _visual_hint_fn[0] is not None:
+            _visual_hint_fn[0]("ideal_slide", description)
 
         return {"recorded": True, "issue_type": issue_type}
 
@@ -261,7 +385,41 @@ def make_coaching_tools(state: "SessionState") -> list:
             "filler_breakdown_30s": filler_breakdown_30s,
             "duration_s": round(now_rel, 1),
             "word_count": total_word_count,
+            "pitch_variance_hz": float(state.prosody_metrics.get("pitch_variance_hz", 0.0)),
+            "pause_ratio_20s": float(state.prosody_metrics.get("pause_ratio_20s", 0.0)),
+            "speaking_energy": float(state.prosody_metrics.get("speaking_energy", 0.0)),
+            "monotony_score": float(state.prosody_metrics.get("monotony_score", 0.0)),
+            "voiced_seconds_20s": float(state.prosody_metrics.get("voiced_seconds_20s", 0.0)),
         }
+
+        if result["wpm_20s"] > 180:
+            state.record_signal(
+                "pace_high",
+                measured=round(result["wpm_20s"], 1),
+                threshold=">180 WPM",
+                source="speech_metrics",
+            )
+        if result["filler_count_30s"] >= 3:
+            state.record_signal(
+                "filler_burst",
+                measured=int(result["filler_count_30s"]),
+                threshold=">=3 in 30s",
+                source="speech_metrics",
+            )
+        if result["voiced_seconds_20s"] >= 6 and result["pause_ratio_20s"] < 0.10:
+            state.record_signal(
+                "pause_low",
+                measured=round(result["pause_ratio_20s"], 3),
+                threshold="<0.10",
+                source="prosody",
+            )
+        if result["voiced_seconds_20s"] >= 6 and result["monotony_score"] >= 70:
+            state.record_signal(
+                "monotony_high",
+                measured=round(result["monotony_score"], 1),
+                threshold=">=70",
+                source="prosody",
+            )
 
         # Push tool call to browser so judges can see objective measurement
         state._enqueue({
@@ -269,7 +427,7 @@ def make_coaching_tools(state: "SessionState") -> list:
             "tool": "get_speech_metrics",
             "args": result,
         })
-
+        _last_grounding_time[0] = time.monotonic()
         return result
 
     def get_recent_transcript(n_words: int = 60) -> str:
@@ -296,7 +454,8 @@ def make_coaching_tools(state: "SessionState") -> list:
             "tool": "get_recent_transcript",
             "args": {"n_words": n_words, "returned_words": len(all_words[-n_words:])},
         })
-
+        state.record_signal("transcript_grounded", measured=n_words, threshold="recent_window", source="transcript")
+        _last_grounding_time[0] = time.monotonic()
         return text
 
     # Mutable state for eye contact debounce — shared across check_eye_contact calls
@@ -366,7 +525,14 @@ def make_coaching_tools(state: "SessionState") -> list:
             "tool": "check_eye_contact",
             "args": {"gaze": norm_gaze or gaze_direction, **result},
         })
-
+        if confirmed:
+            state.record_signal(
+                "eye_contact_confirmed",
+                measured=round(seconds_away, 1),
+                threshold=f">={_EYE_CONTACT_THRESHOLD_S}s",
+                source="eye_contact",
+            )
+        _last_grounding_time[0] = time.monotonic()
         return result
 
     def check_slide_clarity(signal: str, evidence: str = "") -> dict:
@@ -401,6 +567,12 @@ def make_coaching_tools(state: "SessionState") -> list:
             return result
 
         _last_slide_signal[norm_signal] = now
+        state.record_signal(
+            f"slide_{norm_signal}",
+            measured=1,
+            threshold="confirmed",
+            source="slide_clarity",
+        )
         suggestion_map = {
             "clutter": "Cut to three bullets max and one visual.",
             "unreadable_text": "Increase font size and simplify chart labels.",
@@ -418,6 +590,7 @@ def make_coaching_tools(state: "SessionState") -> list:
             "tool": "check_slide_clarity",
             "args": result,
         })
+        _last_grounding_time[0] = time.monotonic()
         return result
 
     def draw_overlay(x: float, y: float, label: str = "") -> dict:
@@ -603,6 +776,7 @@ def make_coaching_tools(state: "SessionState") -> list:
         }
         title = _title_map[_ht]
         _ctx = (context or "")[:300]
+        rationale = _ctx or "Reduce clutter and emphasize one clear takeaway."
 
         # Notify frontend immediately so a spinner appears in the transcript feed
         state._enqueue({
@@ -656,6 +830,8 @@ def make_coaching_tools(state: "SessionState") -> list:
                 img_bytes = _render_fallback_card(title, _ctx[:80] or "Live coaching visual")
                 source = "fallback"
 
+            before_b64 = (state.last_slide_frame_b64 or "") if _ht == "ideal_slide" else ""
+            state.live_visual_hints_ready += 1
             state._enqueue({
                 "type": "live_visual_hint",
                 "status": "ready",
@@ -664,6 +840,8 @@ def make_coaching_tools(state: "SessionState") -> list:
                 "mime_type": "image/jpeg",
                 "data_base64": base64.b64encode(img_bytes).decode("ascii"),
                 "source": source,
+                "before_b64": before_b64,  # non-empty → render before/after side-by-side
+                "rationale": rationale[:160],
             })
 
         try:
@@ -673,6 +851,9 @@ def make_coaching_tools(state: "SessionState") -> list:
             pass  # No event loop (e.g. tests) — skip silently
 
         return {"status": "generating", "hint_type": _ht, "title": title}
+
+    # Bind the late reference so flag_issue can auto-trigger on slide issues
+    _visual_hint_fn[0] = generate_live_visual_hint
 
     return [
         flag_issue,

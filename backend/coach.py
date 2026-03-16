@@ -175,7 +175,9 @@ mark_slide_issue(issue_type, label="")
 generate_live_visual_hint(hint_type, context="")
   -> Generate an Imagen coaching visual displayed live in session.
   -> hint_type: "ideal_slide" | "ideal_posture" | "key_concept"
-  -> CALL when presenter says: "show me ideal slide", "show me proper posture/camera setup",
+  -> AUTO-CALL "ideal_slide" immediately after flagging any confirmed slide_clarity or slide_mismatch issue
+     (pass a 1-sentence context describing the problem, e.g. "dense bullet slide for Q3 revenue").
+  -> ALSO CALL when presenter says: "show me ideal slide", "show me proper posture/camera setup",
      "give me a visual for this", or asks for any live demonstration image.
   -> Returns immediately; image appears in ~15s. Speak your verbal explanation right away.
 
@@ -254,6 +256,11 @@ Issue mapping:
 - clutter/unreadable_text/weak_hierarchy -> issue_type="slide_clarity"
 - speech_mismatch -> issue_type="slide_mismatch"
 
+After flagging ANY confirmed slide issue:
+- Call generate_live_visual_hint("ideal_slide", "<1-sentence description of the problem slide>")
+- This generates an ideal redesigned slide for the presenter in real time.
+- Do this before speaking — image appears within ~15s as you give verbal feedback.
+
 Example callouts:
 - "Slide is text-dense. Cut to three bullets."
 - "This chart is unreadable. Increase font size."
@@ -265,9 +272,10 @@ Prioritize deterministic, objective interruptions early in the session:
 1) filler words
 2) pace
 3) eye contact
-4) slide clarity (if screen share is active)
+4) slide clarity (if screen share is active) + generate_live_visual_hint("ideal_slide", ...)
 
 In demo mode, speak corrections crisply so observers can clearly hear each intervention.
+Trigger generate_live_visual_hint on the FIRST confirmed slide issue so judges see the image generation feature.
 """
 
     chunks = [base]

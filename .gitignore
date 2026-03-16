@@ -41,3 +41,7 @@ Gemini_Generated_Image_*.png
 
 # Python venv
 .venv/
+env.yaml
+prompt.md
+hackathon.txt
+guide.md
