@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PitchMirror — AI Speaking Coach</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@10..48,500;10..48,700;10..48,800&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- Header -->
+    <header class="site-header">
+      <a class="logo" href="/">
+        <span class="logo-mark">◎</span>
+        <span class="logo-name">PitchMirror</span>
+      </a>
+      <div id="session-timer" class="session-timer hidden">00:00</div>
+      <div id="status-badge" class="status-badge idle">Idle</div>
+    </header>
+
+    <!-- Main layout -->
+    <main>
+
+      <!-- Left: Camera + Controls -->
+      <section class="camera-panel">
+        <div class="video-wrapper">
+          <video id="local-video" autoplay muted playsinline></video>
+          <!-- Drawing overlay for AI annotations -->
+          <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
+          <!-- Broadcast-style corner brackets -->
+          <div class="brackets">
+            <span class="bracket tl"></span>
+            <span class="bracket tr"></span>
+            <span class="bracket bl"></span>
+            <span class="bracket br"></span>
+          </div>
+          <div id="video-overlay" class="video-overlay hidden">
+            <div id="eye-indicator" class="eye-indicator">
+              <span class="eye-dot"></span>
+              <span id="eye-label">Camera OK</span>
+            </div>
+          </div>
+          <div id="recording-indicator" class="recording-indicator hidden">
+            <span class="rec-dot"></span>REC
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="btn-start" class="btn btn-start">
+            <span class="btn-icon">▶</span>
+            <span>Start Session</span>
+          </button>
+          <button id="btn-stop" class="btn btn-stop hidden">
+            <span class="btn-icon">■</span>
+            <span>End Session</span>
+          </button>
+        </div>
+
+        <div class="practice-deck">
+          <div class="practice-deck-header">
+            <span>Presentation Slides (Canva/PPT)</span>
+            <span id="deck-indicator" class="deck-indicator">1/5</span>
+          </div>
+          <div class="slide-upload-row">
+            <input id="slide-upload" class="slide-upload-input" type="file" accept=".pdf,application/pdf" />
+            <button id="slide-upload-btn" type="button" class="deck-btn slide-upload-btn">Upload PDF</button>
+          </div>
+          <div id="slide-upload-status" class="slide-upload-status">No uploaded slides</div>
+          <div class="practice-slide">
+            <img id="deck-slide-image" class="deck-slide-image hidden" alt="Uploaded slide preview" />
+            <div id="deck-slide-placeholder" class="deck-slide-placeholder hidden"></div>
+            <div id="deck-slide-title" class="deck-slide-title"></div>
+            <div id="deck-slide-body" class="deck-slide-body"></div>
+          </div>
+          <div class="practice-deck-controls">
+            <button id="deck-prev" type="button" class="deck-btn">Prev</button>
+            <button id="deck-next" type="button" class="deck-btn">Next</button>
+          </div>
+        </div>
+
+        <div class="session-config">
+          <div class="config-heading">Session Intake</div>
+          <label class="config-field">
+            <span class="config-label">Who is your coach today?</span>
+            <select id="coach-persona" class="config-select">
+              <option value="coach">Professional Coach</option>
+              <option value="vc">Brutal VC</option>
+              <option value="mentor">Supportive Mentor</option>
+            </select>
+          </label>
+
+          <label class="config-field">
+            <span class="config-label">What are you preparing for?</span>
+            <select id="coach-mode" class="config-select">
+              <option value="general">General Speaking</option>
+              <option value="presentation">Presentation</option>
+              <option value="interview">Interview</option>
+              <option value="sales_demo">Sales Demo</option>
+              <option value="pitch">Pitch</option>
+            </select>
+          </label>
+
+          <label class="config-field">
+            <span class="config-label">Where will you deliver this?</span>
+            <select id="delivery-context" class="config-select">
+              <option value="virtual">Virtual</option>
+              <option value="in_person">In Person</option>
+              <option value="hybrid">Hybrid</option>
+            </select>
+          </label>
+
+          <label class="config-field">
+            <span class="config-label">Primary goal for this run?</span>
+            <select id="primary-goal" class="config-select">
+              <option value="balanced">Balanced improvement</option>
+              <option value="reduce_fillers">Reduce filler words</option>
+              <option value="improve_pacing">Improve pacing</option>
+              <option value="improve_confidence">Improve confidence</option>
+              <option value="improve_structure">Improve structure</option>
+            </select>
+          </label>
+
+          <label class="config-toggle">
+            <input id="screen-share-toggle" type="checkbox" />
+            <span>Screen-aware coaching</span>
+          </label>
+
+          <label class="config-toggle">
+            <input id="demo-mode-toggle" type="checkbox" />
+            <span>Deterministic demo mode</span>
+          </label>
+        </div>
+
+        <!-- Live metrics bar -->
+        <div id="live-metrics" class="live-metrics hidden">
+          <div class="metric-chip" id="chip-filler">
+            <span class="metric-label">Fillers</span>
+            <span class="metric-value" id="val-filler">0</span>
+          </div>
+          <div class="metric-chip" id="chip-eye">
+            <span class="metric-label">Eye drops</span>
+            <span class="metric-value" id="val-eye">0</span>
+          </div>
+          <div class="metric-chip" id="chip-pace">
+            <span class="metric-label">Pace flags</span>
+            <span class="metric-value" id="val-pace">0</span>
+          </div>
+          <div class="metric-chip" id="chip-clarity">
+            <span class="metric-label">Clarity</span>
+            <span class="metric-value" id="val-clarity">0</span>
+          </div>
+          <div class="metric-chip" id="chip-visuals">
+            <span class="metric-label">Slide flags</span>
+            <span class="metric-value" id="val-visuals">0</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: Transcript + Analysis + Scorecard -->
+      <section class="right-panel">
+
+        <!-- Transcript feed -->
+        <div id="transcript-panel" class="transcript-panel">
+          <div class="panel-header">
+            <span class="panel-header-dot"></span>
+            Live Transcript
+          </div>
+          <div id="transcript-feed" class="transcript-feed">
+            <!-- Pre-session welcome panel -->
+            <div id="welcome-panel" class="welcome-panel">
+              <div class="welcome-icon">◎</div>
+              <h2 class="welcome-title">Ready to rehearse?</h2>
+              <p class="welcome-subtitle">
+                Your AI coach listens, watches, and gives real-time speaking feedback.
+              </p>
+              <div class="welcome-checklist">
+                <div class="check-item">
+                  <span class="check-num">01</span>
+                  <span>Position yourself clearly in frame</span>
+                </div>
+                <div class="check-item">
+                  <span class="check-num">02</span>
+                  <span>Ensure good lighting and a quiet space</span>
+                </div>
+                <div class="check-item">
+                  <span class="check-num">03</span>
+                  <span>Open your talk notes, slides, or interview prompts</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Post-session analysis pipeline -->
+        <div id="analysis-panel" class="analysis-panel hidden">
+          <div class="panel-header">
+            <span class="panel-header-dot spinning"></span>
+            Post-Session Analysis
+          </div>
+          <div class="analysis-pipeline">
+            <div class="pipeline-step" id="step-delivery">
+              <span class="step-dot spinning"></span>
+              <div class="step-info">
+                <span class="step-name">Delivery Analyst</span>
+                <span class="step-tag">filler · pace · eye contact</span>
+              </div>
+            </div>
+            <div class="pipeline-connector"></div>
+            <div class="pipeline-step" id="step-content">
+              <span class="step-dot spinning"></span>
+              <div class="step-info">
+                <span class="step-name">Content Analyst</span>
+                <span class="step-tag">logic · clarity</span>
+              </div>
+            </div>
+            <div class="pipeline-connector"></div>
+            <div class="pipeline-step" id="step-research">
+              <span class="step-dot spinning"></span>
+              <div class="step-info">
+                <span class="step-name">Research Agent</span>
+                <span class="step-tag">google search · citations</span>
+              </div>
+            </div>
+            <div class="pipeline-merge">↓ synthesis</div>
+            <div class="pipeline-step" id="step-synthesis">
+              <span class="step-dot spinning"></span>
+              <div class="step-info">
+                <span class="step-name">Synthesis Agent</span>
+                <span class="step-tag">final report</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scorecard (shown after analysis) -->
+        <div id="scorecard-panel" class="scorecard-panel hidden">
+          <div class="panel-header">Session Scorecard</div>
+          <div id="scorecard-content" class="scorecard-content">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+
+      </section>
+    </main>
+
+    <!-- Coach interrupt toast -->
+    <div id="coach-toast" class="coach-toast hidden">
+      <div class="toast-waveform">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div id="toast-text" class="toast-text"></div>
+    </div>
+
+  </div>
+
+  <!-- Live visual hint modal -->
+  <div id="live-visual-modal" class="lv-modal hidden" onclick="closeLiveVisualModal()">
+    <div class="lv-modal-inner" onclick="event.stopPropagation()">
+      <div class="lv-modal-header">
+        <span id="lv-modal-title" class="lv-modal-title"></span>
+        <button class="lv-modal-close" onclick="closeLiveVisualModal()">✕</button>
+      </div>
+      <img id="lv-modal-img" class="lv-modal-img" src="" alt="Live visual coaching hint" />
+      <p class="lv-modal-caption">Generated by Imagen · PitchMirror live coaching</p>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

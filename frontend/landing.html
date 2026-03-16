@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PitchMirror — Real-Time AI Speaking Coach</title>
+  <meta name="description" content="PitchMirror watches your speaking session live — catches filler words, pace spikes, and eye contact drops in real time, then generates an evidence-backed coaching report." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@10..48,400;10..48,700;10..48,800&family=Plus+Jakarta+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    :root {
+      --white:   #ffffff;
+      --ink:     #0c0e14;
+      --ink-dim: #374151;
+      --ink-mid: #6b7280;
+      --ink-low: #9ca3af;
+      --border:  #e5e7eb;
+      --gray-50: #f9fafb;
+
+      --blue:        #3b82f6;
+      --blue-bg:     #eff6ff;
+      --violet:      #8b5cf6;
+      --violet-bg:   #f5f3ff;
+      --green:       #22c55e;
+      --green-bg:    #f0fdf4;
+      --orange:      #f97316;
+      --orange-bg:   #fff7ed;
+      --red:         #ef4444;
+      --amber:       #f59e0b;
+
+      --font-d: 'Bricolage Grotesque', sans-serif;
+      --font-b: 'Plus Jakarta Sans', sans-serif;
+      --font-m: 'IBM Plex Mono', monospace;
+
+      --max:         1100px;
+      --card-r:      20px;
+      --card-shadow: 0 2px 40px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.05);
+    }
+
+    body {
+      font-family: var(--font-b);
+      color: var(--ink);
+      background: var(--white);
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    .wrap { width: min(var(--max), 100% - 48px); margin: 0 auto; }
+
+    /* ── Animations ── */
+    @keyframes blink    { 0%,100%{opacity:1} 50%{opacity:0} }
+    @keyframes fade-up  { from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:none} }
+    @keyframes pulse    { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(0.6)} }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(255,255,255,0.96);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-row {
+      height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      text-decoration: none;
+      color: var(--ink);
+    }
+
+    .nav-mark { font-size: 18px; line-height: 1; }
+
+    .nav-name {
+      font-family: var(--font-d);
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+    }
+
+    .nav-pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--ink-mid);
+    }
+
+    .nav-cta {
+      background: var(--ink);
+      color: white;
+      border-radius: 999px;
+      padding: 10px 22px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .nav-cta:hover { opacity: 0.82; transform: translateY(-1px); }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 100px 0 72px;
+      text-align: center;
+      animation: fade-up 0.6s cubic-bezier(0.22,0.61,0.36,1) both;
+    }
+
+    .hero h1 {
+      font-family: var(--font-d);
+      font-size: clamp(46px, 6.8vw, 80px);
+      font-weight: 800;
+      letter-spacing: -3.5px;
+      line-height: 1.03;
+      margin-bottom: 24px;
+    }
+
+    .h1-dark { display: block; color: var(--ink); }
+    .h1-dim  { display: block; color: var(--ink-low); }
+
+    .hero-sub {
+      font-size: clamp(15px, 2vw, 18px);
+      line-height: 1.72;
+      color: var(--ink-mid);
+      max-width: 480px;
+      margin: 0 auto 38px;
+    }
+
+    .cta-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--ink);
+      color: white;
+      border-radius: 999px;
+      padding: 15px 34px;
+      font-size: 15px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .cta-pill:hover { opacity: 0.84; transform: translateY(-1px); }
+
+    .hero-trust {
+      margin-top: 16px;
+      font-size: 13px;
+      color: var(--ink-low);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    /* ── Hero mockup ── */
+    .hero-mockup {
+      margin-top: 64px;
+      width: min(880px, 100%);
+      margin-left: auto;
+      margin-right: auto;
+      animation: fade-up 0.75s 0.12s cubic-bezier(0.22,0.61,0.36,1) both;
+    }
+
+    .b-chrome {
+      background: #f3f4f6;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 14px 14px 0 0;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .b-dots { display: flex; gap: 6px; }
+    .b-dots span { width: 10px; height: 10px; border-radius: 50%; }
+    .b-dots span:nth-child(1) { background: #ff5f57; }
+    .b-dots span:nth-child(2) { background: #febc2e; }
+    .b-dots span:nth-child(3) { background: #28c840; }
+
+    .b-url {
+      flex: 1; max-width: 220px; margin: 0 auto;
+      background: white; border: 1px solid var(--border);
+      border-radius: 6px; padding: 4px 10px;
+      font-family: var(--font-m); font-size: 11px;
+      color: var(--ink-mid);
+    }
+
+    .b-body {
+      background: #fafafa;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 14px 14px;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.1), 0 4px 16px rgba(0,0,0,0.05);
+    }
+
+    /* Mini app inside browser */
+    .m-header {
+      background: white;
+      border-bottom: 1px solid var(--border);
+      padding: 0 18px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .m-logo { font-family: var(--font-d); font-size: 13px; font-weight: 700; }
+    .m-timer { font-family: var(--font-m); font-size: 12px; color: var(--blue); letter-spacing: 1.5px; }
+    .m-badge {
+      background: rgba(59,130,246,0.08);
+      color: var(--blue);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 20px;
+      font-size: 9px; font-weight: 700;
+      letter-spacing: 0.6px; text-transform: uppercase;
+      padding: 3px 9px;
+    }
+
+    .m-body {
+      display: grid;
+      grid-template-columns: 196px 1fr;
+      padding: 12px; gap: 10px;
+      min-height: 256px;
+    }
+
+    .m-cam-col { display: flex; flex-direction: column; gap: 8px; }
+
+    .m-video {
+      width: 100%; aspect-ratio: 4/3;
+      background: #0c1422;
+      border-radius: 8px; position: relative; overflow: hidden;
+    }
+    .m-video::after {
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse at 40% 28%, rgba(255,255,255,0.07), transparent 60%);
+    }
+
+    .m-rec {
+      position: absolute; top: 7px; left: 7px; z-index: 2;
+      background: rgba(220,38,38,0.9); color: white;
+      font-family: var(--font-m); font-size: 8px; font-weight: 600;
+      letter-spacing: 1px; padding: 2px 7px; border-radius: 3px;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .rec-dot { width: 5px; height: 5px; border-radius: 50%; background: white; animation: blink 1s step-end infinite; }
+
+    .m-chips { display: grid; grid-template-columns: repeat(2,1fr); gap: 5px; }
+
+    .m-chip {
+      background: white; border: 1px solid var(--border);
+      border-radius: 7px; padding: 6px 8px; text-align: center;
+    }
+    .m-chip-lbl {
+      display: block; font-size: 7.5px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.4px;
+      color: var(--ink-low); margin-bottom: 2px;
+    }
+    .m-chip-val {
+      font-family: var(--font-m); font-size: 17px; font-weight: 600;
+      color: var(--ink); line-height: 1;
+    }
+    .m-chip-val.alert { color: var(--red); }
+
+    .m-tx-col {
+      background: white; border: 1px solid var(--border);
+      border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    .m-tx-head {
+      padding: 8px 11px 7px; border-bottom: 1px solid var(--border);
+      font-size: 8px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.5px; color: var(--ink-low);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .m-live-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); animation: blink 1.2s step-end infinite; }
+
+    .m-lines { padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
+    .m-line  { display: flex; gap: 6px; align-items: flex-start; }
+
+    .m-spk {
+      font-family: var(--font-m); font-size: 7.5px; font-weight: 600;
+      text-transform: uppercase; padding-top: 2px;
+      min-width: 30px; flex-shrink: 0;
+    }
+    .m-spk.you   { color: #0891b2; }
+    .m-spk.coach { color: var(--violet); }
+    .m-spk.adk   { color: var(--blue); }
+
+    .m-txt {
+      font-size: 11px; line-height: 1.45;
+      padding: 3px 8px; border-radius: 0 5px 5px 0; flex: 1;
+    }
+    .m-txt.you   { background: rgba(8,145,178,0.07);   border-left: 2px solid rgba(8,145,178,0.3); }
+    .m-txt.coach { background: rgba(139,92,246,0.07);  border-left: 2px solid rgba(139,92,246,0.3); font-style: italic; }
+    .m-txt.adk   { background: rgba(59,130,246,0.07);  border-left: 2px solid rgba(59,130,246,0.25); display: flex; gap: 5px; align-items: center; }
+
+    .tool-chip {
+      background: rgba(59,130,246,0.1); color: var(--blue);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 3px; font-family: var(--font-m);
+      font-size: 7px; padding: 0 4px; flex-shrink: 0;
+    }
+
+    /* ── Divider ── */
+    .divider { border: none; border-top: 1px solid var(--border); }
+
+    /* ── Feature sections ── */
+    .feat-section {
+      padding: 100px 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 80px;
+      align-items: center;
+    }
+
+    /* Step pill badge (bordered, like pitch1) */
+    .step-pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 11px; font-weight: 600;
+      letter-spacing: 0.3px; text-transform: uppercase;
+      color: var(--ink-dim); background: white;
+      margin-bottom: 22px;
+    }
+
+    .feat-h2 {
+      font-family: var(--font-d);
+      font-size: clamp(28px, 3.6vw, 44px);
+      font-weight: 800;
+      letter-spacing: -1.8px;
+      line-height: 1.1;
+      color: var(--ink);
+      margin-bottom: 18px;
+    }
+
+    .feat-desc {
+      font-size: 16px;
+      line-height: 1.72;
+      color: var(--ink-mid);
+      margin-bottom: 26px;
+    }
+
+    .feat-checks {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    .feat-checks li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--ink-dim);
+      line-height: 1.5;
+    }
+
+    .chk {
+      width: 18px; height: 18px; border-radius: 50%;
+      border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9px; color: var(--ink-low);
+      flex-shrink: 0; margin-top: 1px;
+      background: white;
+    }
+
+    /* ── Floating card ── */
+    .f-card {
+      background: white;
+      border-radius: var(--card-r);
+      box-shadow: var(--card-shadow);
+      overflow: hidden;
+    }
+
+    .f-card-head {
+      padding: 14px 18px 13px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .f-head-title {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--ink-low);
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    .status-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+    }
+    .status-dot.running { background: var(--orange); animation: pulse 1.4s ease-in-out infinite; }
+    .status-dot.done    { background: var(--green); }
+    .status-dot.wait    { background: var(--border); }
+
+    .f-card-body { padding: 18px 20px; }
+
+    /* Transcript in floating card */
+    .card-lines { display: flex; flex-direction: column; gap: 9px; }
+
+    .card-line { display: flex; gap: 8px; align-items: flex-start; }
+
+    .card-spk {
+      font-family: var(--font-m); font-size: 8px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.4px;
+      padding-top: 3px; min-width: 36px; flex-shrink: 0;
+    }
+    .card-spk.you   { color: #0891b2; }
+    .card-spk.coach { color: var(--violet); }
+    .card-spk.adk   { color: var(--blue); }
+
+    .card-txt {
+      font-size: 12.5px; line-height: 1.5;
+      padding: 4px 10px;
+      border-radius: 0 6px 6px 0;
+      flex: 1;
+    }
+    .card-txt.you   { background: rgba(8,145,178,0.07);  border-left: 2px solid rgba(8,145,178,0.3); color: var(--ink-dim); }
+    .card-txt.coach { background: rgba(139,92,246,0.07); border-left: 2px solid rgba(139,92,246,0.3); color: var(--ink-dim); font-style: italic; }
+    .card-txt.adk   { background: rgba(59,130,246,0.07); border-left: 2px solid rgba(59,130,246,0.2); display: flex; gap: 7px; align-items: center; }
+
+    .card-tool-badge {
+      background: rgba(59,130,246,0.1); color: var(--blue);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 4px; font-family: var(--font-m);
+      font-size: 9px; padding: 0 5px; flex-shrink: 0;
+    }
+
+    /* Pipeline in floating card */
+    .pipe-list { display: flex; flex-direction: column; gap: 0; }
+
+    .pipe-step {
+      display: flex; align-items: center; gap: 12px;
+      padding: 11px 12px; border-radius: 10px;
+    }
+    .pipe-step.done    { background: rgba(34,197,94,0.05); }
+    .pipe-step.running { background: rgba(249,115,22,0.05); }
+
+    .pipe-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .pipe-dot.done    { background: var(--green); }
+    .pipe-dot.running { background: var(--orange); animation: blink 1s step-end infinite; }
+    .pipe-dot.wait    { background: #d1d5db; }
+
+    .pipe-info { flex: 1; }
+    .pipe-name { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+    .pipe-tag  { font-size: 10px; color: var(--ink-low); margin-top: 1px; }
+
+    .pipe-badge {
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.3px; padding: 3px 9px; border-radius: 999px;
+    }
+    .pipe-badge.done    { background: rgba(34,197,94,0.1);  color: var(--green); }
+    .pipe-badge.running { background: rgba(249,115,22,0.1); color: var(--orange); }
+    .pipe-badge.wait    { background: var(--gray-50); color: var(--ink-low); }
+
+    .pipe-connector {
+      width: 1px; height: 14px;
+      background: var(--border);
+      margin: 0 0 0 16px;
+    }
+
+    .pipe-merge {
+      text-align: center; font-size: 10.5px;
+      color: var(--ink-low); padding: 8px 0 5px;
+      letter-spacing: 0.3px;
+    }
+
+    /* Scorecard in floating card */
+    .sc-header-row {
+      display: flex; align-items: center; gap: 18px; margin-bottom: 20px;
+    }
+
+    .sc-badge {
+      width: 60px; height: 60px; border-radius: 50%;
+      background: var(--ink); color: white;
+      font-family: var(--font-d); font-size: 24px; font-weight: 800;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .sc-grade { font-family: var(--font-d); font-size: 18px; font-weight: 800; color: var(--ink); }
+    .sc-stars { font-size: 16px; margin-top: 3px; }
+    .star-f { color: var(--amber); }
+    .star-e { color: var(--border); }
+
+    .sc-tiles {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+
+    .sc-tile {
+      border-radius: 12px; padding: 13px 14px;
+    }
+    .sc-tile.blue   { background: var(--blue-bg); }
+    .sc-tile.violet { background: var(--violet-bg); }
+    .sc-tile.green  { background: var(--green-bg); }
+    .sc-tile.orange { background: var(--orange-bg); }
+
+    .sc-tile-lbl {
+      font-size: 9.5px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.4px;
+      margin-bottom: 6px;
+    }
+    .sc-tile.blue   .sc-tile-lbl { color: var(--blue); }
+    .sc-tile.violet .sc-tile-lbl { color: var(--violet); }
+    .sc-tile.green  .sc-tile-lbl { color: #16a34a; }
+    .sc-tile.orange .sc-tile-lbl { color: var(--orange); }
+
+    .sc-tile-stars  { font-size: 13px; }
+    .sc-tile-detail { font-size: 11px; color: var(--ink-mid); margin-top: 3px; }
+
+    /* ── CTA ── */
+    .cta-section {
+      padding: 100px 0;
+      text-align: center;
+      border-top: 1px solid var(--border);
+    }
+
+    .cta-label {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--ink-low); margin-bottom: 20px;
+    }
+
+    .cta-h2 {
+      font-family: var(--font-d);
+      font-size: clamp(38px, 5.5vw, 64px);
+      font-weight: 800;
+      letter-spacing: -3px;
+      line-height: 1.04;
+      margin-bottom: 22px;
+    }
+    .cta-h2 .dim { color: var(--ink-low); }
+
+    .cta-sub {
+      font-size: 16px; color: var(--ink-mid);
+      margin-bottom: 38px;
+    }
+
+    /* ── Footer ── */
+    footer { border-top: 1px solid var(--border); padding: 28px 0; }
+
+    .footer-row {
+      display: flex; align-items: center;
+      justify-content: space-between;
+    }
+
+    .footer-logo {
+      display: flex; align-items: center; gap: 8px;
+      text-decoration: none;
+    }
+    .footer-name { font-family: var(--font-d); font-size: 14px; font-weight: 700; color: var(--ink-dim); }
+
+    .footer-note { font-size: 12px; color: var(--ink-low); }
+
+    .footer-pills { display: flex; gap: 6px; }
+    .footer-pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 11px;
+      font-size: 11px;
+      color: var(--ink-mid);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 860px) {
+      .feat-section { grid-template-columns: 1fr; gap: 40px; padding: 64px 0; }
+      .m-body { grid-template-columns: 1fr; }
+      .m-cam-col { display: none; }
+    }
+    @media (max-width: 600px) {
+      .hero { padding: 64px 0 48px; }
+      .footer-row { flex-direction: column; gap: 14px; text-align: center; }
+      .footer-pills { flex-wrap: wrap; justify-content: center; }
+      .nav-pill { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav>
+    <div class="wrap nav-row">
+      <a href="/" class="nav-logo">
+        <span class="nav-mark">◎</span>
+        <span class="nav-name">PitchMirror</span>
+      </a>
+      <span class="nav-pill">Gemini Live Agent</span>
+      <a href="/app" class="nav-cta">Launch App →</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap">
+      <h1>
+        <span class="h1-dark">Rehearse your speaking.</span>
+        <span class="h1-dim">Perfect your delivery.</span>
+      </h1>
+      <p class="hero-sub">
+        Your AI coach listens, watches, and interrupts only when data confirms a problem — no false positives, no vague impressions.
+      </p>
+      <a href="/app" class="cta-pill">Start coaching session →</a>
+      <div class="hero-trust">
+        <span>⊙</span>
+        <span>No signup required · No credit card</span>
+      </div>
+
+      <!-- Browser mockup -->
+      <div class="hero-mockup">
+        <div class="b-chrome">
+          <div class="b-dots"><span></span><span></span><span></span></div>
+          <div class="b-url">pitchmirror.app</div>
+        </div>
+        <div class="b-body">
+          <div class="m-header">
+            <span class="m-logo">◎ PitchMirror</span>
+            <span class="m-timer">01:12</span>
+            <span class="m-badge">● Listening</span>
+          </div>
+          <div class="m-body">
+            <div class="m-cam-col">
+              <div class="m-video">
+                <div class="m-rec"><span class="rec-dot"></span>REC</div>
+              </div>
+              <div class="m-chips">
+                <div class="m-chip">
+                  <span class="m-chip-lbl">Fillers</span>
+                  <span class="m-chip-val alert">4</span>
+                </div>
+                <div class="m-chip">
+                  <span class="m-chip-lbl">Eye drops</span>
+                  <span class="m-chip-val">1</span>
+                </div>
+                <div class="m-chip">
+                  <span class="m-chip-lbl">Pace flags</span>
+                  <span class="m-chip-val">0</span>
+                </div>
+                <div class="m-chip">
+                  <span class="m-chip-lbl">Clarity</span>
+                  <span class="m-chip-val">0</span>
+                </div>
+              </div>
+            </div>
+            <div class="m-tx-col">
+              <div class="m-tx-head">
+                <span class="m-live-dot"></span>
+                Live Transcript
+              </div>
+              <div class="m-lines">
+                <div class="m-line">
+                  <span class="m-spk you">You</span>
+                  <span class="m-txt you">So basically, um, our solution addresses the core problem in the market and we're seeing forty percent faster close rates...</span>
+                </div>
+                <div class="m-line">
+                  <span class="m-spk adk">ADK</span>
+                  <div class="m-txt adk">
+                    <span class="tool-chip">get_speech_metrics</span>
+                    <span style="font-size:10px;color:#6b7280">195 WPM · 4 fillers/30s</span>
+                  </div>
+                </div>
+                <div class="m-line">
+                  <span class="m-spk coach">Coach</span>
+                  <span class="m-txt coach">Four fillers in thirty seconds — pause instead.</span>
+                </div>
+                <div class="m-line">
+                  <span class="m-spk you">You</span>
+                  <span class="m-txt you">Our twelve pilot companies averaged 3.2 months to positive return on investment.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- FEATURE 1 — Live Coaching -->
+  <div class="wrap">
+    <div class="feat-section">
+      <div>
+        <span class="step-pill">Step 01 — Live AI Coaching</span>
+        <h2 class="feat-h2">Real-time feedback,<br>every sentence.</h2>
+        <p class="feat-desc">PitchMirror watches your delivery and interrupts only when hard data confirms a problem. No guesses — only measured evidence.</p>
+        <ul class="feat-checks">
+          <li>
+            <span class="chk">○</span>
+            <span>Filler words flagged when count exceeds 3 in the last 30 seconds</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Pace interruptions cite your exact WPM from a rolling 20-second window</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Eye contact drops confirmed only after 5 consecutive seconds — no single-frame false positives</span>
+          </li>
+        </ul>
+      </div>
+      <div>
+        <div class="f-card">
+          <div class="f-card-head">
+            <span class="f-head-title">
+              <span class="status-dot running"></span>
+              Live Session
+            </span>
+            <span style="font-family:var(--font-m);font-size:11px;color:var(--ink-low)">00:42</span>
+          </div>
+          <div class="f-card-body">
+            <div class="card-lines">
+              <div class="card-line">
+                <span class="card-spk you">You</span>
+                <span class="card-txt you">We've already signed three enterprise pilots and are seeing a consistent 40% reduction in time-to-decision across all accounts...</span>
+              </div>
+              <div class="card-line">
+                <span class="card-spk adk">ADK</span>
+                <div class="card-txt adk">
+                  <span class="card-tool-badge">check_eye_contact</span>
+                  <span style="font-size:11px;color:var(--orange)">6.1s away · confirmed</span>
+                </div>
+              </div>
+              <div class="card-line">
+                <span class="card-spk coach">Coach</span>
+                <span class="card-txt coach">Look at the camera.</span>
+              </div>
+              <div class="card-line">
+                <span class="card-spk you">You</span>
+                <span class="card-txt you">Our Series A target is Q3, which positions us ahead of the two competitors currently in the market.</span>
+              </div>
+              <div class="card-line">
+                <span class="card-spk adk">ADK</span>
+                <div class="card-txt adk">
+                  <span class="card-tool-badge">get_speech_metrics</span>
+                  <span style="font-size:11px;color:var(--ink-low)">138 WPM · 0 fillers/30s</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- FEATURE 2 — Multi-Agent Analysis -->
+  <div class="wrap">
+    <div class="feat-section">
+      <div>
+        <span class="step-pill">Step 02 — Post-Session Analysis</span>
+        <h2 class="feat-h2">Three agents.<br>One report.</h2>
+        <p class="feat-desc">When you finish, three specialist AI agents run simultaneously — delivery, content quality, and a Google Search-grounded research agent.</p>
+        <ul class="feat-checks">
+          <li>
+            <span class="chk">○</span>
+            <span>Delivery Analyst covers filler patterns, pace variance, and eye contact timeline</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Content Analyst evaluates logical flow, structure, and clarity gaps</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Research Agent uses live Google Search to find expert techniques for your specific weaknesses</span>
+          </li>
+        </ul>
+      </div>
+      <div>
+        <div class="f-card">
+          <div class="f-card-head">
+            <span class="f-head-title">
+              <span class="status-dot running"></span>
+              Post-Session Analysis
+            </span>
+          </div>
+          <div class="f-card-body">
+            <div class="pipe-list">
+              <div class="pipe-step done">
+                <span class="pipe-dot done"></span>
+                <div class="pipe-info">
+                  <div class="pipe-name">Delivery Analyst</div>
+                  <div class="pipe-tag">filler · pace · eye contact</div>
+                </div>
+                <span class="pipe-badge done">Done</span>
+              </div>
+              <div class="pipe-connector"></div>
+              <div class="pipe-step done">
+                <span class="pipe-dot done"></span>
+                <div class="pipe-info">
+                  <div class="pipe-name">Content Analyst</div>
+                  <div class="pipe-tag">logic · clarity · structure</div>
+                </div>
+                <span class="pipe-badge done">Done</span>
+              </div>
+              <div class="pipe-connector"></div>
+              <div class="pipe-step running">
+                <span class="pipe-dot running"></span>
+                <div class="pipe-info">
+                  <div class="pipe-name">Research Agent</div>
+                  <div class="pipe-tag">google search · citations</div>
+                </div>
+                <span class="pipe-badge running">Running</span>
+              </div>
+              <div class="pipe-merge">↓ synthesis</div>
+              <div class="pipe-step">
+                <span class="pipe-dot wait"></span>
+                <div class="pipe-info">
+                  <div class="pipe-name">Synthesis Agent</div>
+                  <div class="pipe-tag">final report</div>
+                </div>
+                <span class="pipe-badge wait">Waiting</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- FEATURE 3 — Scorecard -->
+  <div class="wrap">
+    <div class="feat-section">
+      <div>
+        <span class="step-pill">Step 03 — Your Scorecard</span>
+        <h2 class="feat-h2">Scored. Sourced.<br>Actionable.</h2>
+        <p class="feat-desc">Every session ends with a structured coaching report — star ratings across four dimensions and expert-sourced recommendations, grounded in your transcript.</p>
+        <ul class="feat-checks">
+          <li>
+            <span class="chk">○</span>
+            <span>Star ratings for filler words, eye contact, speaking pace, and clarity</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Citation cards with expert techniques sourced from Google Search</span>
+          </li>
+          <li>
+            <span class="chk">○</span>
+            <span>Synthesis report grounded in your actual transcript — never generic advice</span>
+          </li>
+        </ul>
+      </div>
+      <div>
+        <div class="f-card">
+          <div class="f-card-head">
+            <span class="f-head-title">
+              <span class="status-dot done"></span>
+              Session Scorecard
+            </span>
+            <span style="font-family:var(--font-m);font-size:11px;color:var(--ink-low)">⏱ 2:14</span>
+          </div>
+          <div class="f-card-body">
+            <div class="sc-header-row">
+              <div class="sc-badge">82</div>
+              <div>
+                <div class="sc-grade">Good delivery</div>
+                <div class="sc-stars">
+                  <span class="star-f">★★★★</span><span class="star-e">★</span>
+                </div>
+              </div>
+            </div>
+            <div class="sc-tiles">
+              <div class="sc-tile blue">
+                <div class="sc-tile-lbl">🎙 Filler Words</div>
+                <div class="sc-tile-stars">
+                  <span style="color:var(--amber)">★★★</span><span style="color:#e5e7eb">★★</span>
+                </div>
+                <div class="sc-tile-detail">4 instances — mostly "um"</div>
+              </div>
+              <div class="sc-tile violet">
+                <div class="sc-tile-lbl">👁 Eye Contact</div>
+                <div class="sc-tile-stars">
+                  <span style="color:var(--amber)">★★★★★</span>
+                </div>
+                <div class="sc-tile-detail">Strong — 1 short drop</div>
+              </div>
+              <div class="sc-tile green">
+                <div class="sc-tile-lbl">⚡ Speaking Pace</div>
+                <div class="sc-tile-stars">
+                  <span style="color:var(--amber)">★★★★</span><span style="color:#e5e7eb">★</span>
+                </div>
+                <div class="sc-tile-detail">One burst at 195 WPM</div>
+              </div>
+              <div class="sc-tile orange">
+                <div class="sc-tile-lbl">💡 Clarity</div>
+                <div class="sc-tile-stars">
+                  <span style="color:var(--amber)">★★★★★</span>
+                </div>
+                <div class="sc-tile-detail">Clear throughout</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <section class="cta-section">
+    <div class="wrap">
+      <div class="cta-label">Ready to improve?</div>
+      <h2 class="cta-h2">
+        <span class="dim">Your next talk,</span><br>coached.
+      </h2>
+      <p class="cta-sub">No signup. No credit card. Allow camera and mic, start talking.</p>
+      <a href="/app" class="cta-pill" style="font-size:16px;padding:17px 40px">Start coaching session →</a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="wrap footer-row">
+      <a href="/" class="footer-logo">
+        <span style="font-size:16px">◎</span>
+        <span class="footer-name">PitchMirror</span>
+      </a>
+      <span class="footer-note">Gemini Live Agent Challenge 2025</span>
+      <div class="footer-pills">
+        <span class="footer-pill">Gemini 2.5 Live</span>
+        <span class="footer-pill">ADK</span>
+        <span class="footer-pill">Google Search</span>
+        <span class="footer-pill">Cloud Run</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

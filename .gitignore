@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Terraform local state and working dir
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+
+# Local dev / generated artifacts
+.gemini/
+generated-diagrams/
+pitch1/
+
+# Stray binaries / generated images at repo root
+*.pdf
+Gemini_Generated_Image_*.png
+
+# Python venv
+.venv/
