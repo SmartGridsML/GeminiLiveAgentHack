@@ -437,7 +437,7 @@ Supporting proof links (if multiple links are allowed):
 
 Live deployed backend URL (include in project description):
 
-- `https://pitchmirror-zdlcn62fmq-uc.a.run.app`
+- `https://pitchmirror-101569338664.us-central1.run.app`
 
 ---
 
