@@ -11,7 +11,6 @@
  */
 
 /* ── Config ──────────────────────────────────────── */
-const API_TOKEN = window.PITCHMIRROR_API_TOKEN || window.localStorage.getItem('pitchmirror_api_token') || '';
 const WS_BASE_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CHUNK_MS = 100;        // Send 100ms chunks
@@ -53,13 +52,15 @@ function makeFrame(typeId, payloadBuffer) {
 
 function authHeaders() {
   const headers = { 'x-user-id': CLIENT_USER_ID };
-  if (API_TOKEN) headers['Authorization'] = `Bearer ${API_TOKEN}`;
+  const token = getApiToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
 }
 
 function buildWsUrl(sessionCfg = {}) {
   const url = new URL(WS_BASE_URL);
-  if (API_TOKEN) url.searchParams.set('token', API_TOKEN);
+  const token = getApiToken();
+  if (token) url.searchParams.set('token', token);
   if (CLIENT_USER_ID) url.searchParams.set('user', CLIENT_USER_ID);
   if (sessionCfg.persona) url.searchParams.set('persona', sessionCfg.persona);
   if (sessionCfg.mode) url.searchParams.set('mode', sessionCfg.mode);
@@ -68,6 +69,14 @@ function buildWsUrl(sessionCfg = {}) {
   if (sessionCfg.screenEnabled) url.searchParams.set('screen', '1');
   if (sessionCfg.demoMode) url.searchParams.set('demo', '1');
   return url.toString();
+}
+
+function getApiToken() {
+  const raw =
+    window.PITCHMIRROR_API_TOKEN ??
+    window.localStorage.getItem('pitchmirror_api_token') ??
+    '';
+  return String(raw).trim();
 }
 
 /* ── State ───────────────────────────────────────── */
@@ -388,7 +397,12 @@ async function uploadSlidesPdf(file) {
     if (total > 1) prefetchSlidesBackground(uploadedDeckId, total);
   } catch (err) {
     console.error('slide upload failed', err);
-    updateSlideUploadStatus(err.message || 'Slide upload failed.', true);
+    const message = String(err?.message || '');
+    if (message.toLowerCase().includes('unauthorized')) {
+      updateSlideUploadStatus('Unauthorized: set pitchmirror_api_token in browser localStorage, then reload.', true);
+    } else {
+      updateSlideUploadStatus(message || 'Slide upload failed.', true);
+    }
   } finally {
     if (slideUploadBtn) slideUploadBtn.disabled = false;
   }
