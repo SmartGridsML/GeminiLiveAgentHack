@@ -7,17 +7,28 @@ __pycache__/
 .env.*
 !.env.example
 
-# Terraform local state and working dir
-**/.terraform/*
+# Terraform — https://developer.hashicorp.com/terraform/language/style#gitignore
+# Local .terraform dirs (plugins, modules cache)
+**/.terraform/
+# State files — may contain secrets in plaintext
 *.tfstate
 *.tfstate.*
+# Crash logs
 crash.log
+crash.*.log
+# Variable files — often contain sensitive values; use .tfvars.example instead
+*.tfvars
+*.tfvars.json
+# Override files (local developer overrides)
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-*.tfvars
-*.tfvars.json
+# CLI config (may contain tokens)
+.terraformrc
+terraform.rc
+# Generated plan files — can contain sensitive resource attributes
+*.tfplan
 
 # Local dev / generated artifacts
 .gemini/
